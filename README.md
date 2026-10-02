@@ -8,7 +8,7 @@ It connects AI assistants such as Claude to data published by the UN Dag Hammars
 - *"Which Security Council resolutions were adopted without a vote in 2025?"*
 - *"Who represents Brazil at the UN, and who spoke for Brazil in the general debate?"*
 
-> **Status: early development.** This is a student project. No tools are working yet; this README describes the design and the rules the project follows.
+> **Status: early development.** This is a student project. The first three tools work (see [Tools](#tools)); more are planned.
 
 UNSpeaks is an independent project. It is **not affiliated with, endorsed by or sponsored by the United Nations** or the Dag Hammarskjöld Library.
 
@@ -26,20 +26,19 @@ AI assistant  ──MCP──▶  UNSpeaks server  ──▶  local SQLite datab
 3. The MCP server answers the assistant's questions from that database. Every answer includes a source citation.
 4. When a question needs a document's full text, the server fetches that one document from the UN Official Document System, within strict rate limits (see [Guidelines](#terms-of-use-and-how-unspeaks-follows-them)).
 
-### Planned tools
+### Tools
 
-These may still change:
-
-- [ ] `search_resolutions`: find General Assembly and Security Council resolutions by keyword, subject, session or date
-- [ ] `get_voting_record`: how each Member State voted on a resolution (yes / no / abstain / non-voting)
-- [ ] `get_country_votes`: a Member State's voting history, filtered by topic or period
+- [x] `get_document`: the text of a UN document by its symbol (e.g. `A/RES/78/1`), a few pages at a time, fetched on demand from the Official Document System
+- [x] `get_voting_record`: how a General Assembly or Security Council resolution was adopted and how each Member State voted
+- [x] `search_votes`: find resolutions by topic, date, session or adoption method, or see how one Member State voted
 - [ ] `get_member_state`: names, codes, membership dates and representatives of a Member State
 - [ ] `find_speakers`: who spoke in the General Assembly general debate, by session or Member State
-- [ ] `get_document`: the text of a UN document by its symbol (e.g. `A/RES/78/1`), fetched on demand
+
+The voting tools are built on a generic core (bodies, decisions, members, votes), with everything UN-specific in a separate loader, so the same tools could later serve another assembly or parliament.
 
 ### Tech stack
 
-- Python 3.10+
+- Python 3.13+
 - [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
 - SQLite, managed with [uv](https://docs.astral.sh/uv/)
 
@@ -123,11 +122,15 @@ UNSpeaks/
 
 ## Getting started
 
-Installation instructions will follow once the first tools work. You will need:
+You need Python 3.13+, [uv](https://docs.astral.sh/uv/) and an MCP-compatible AI assistant such as Claude Desktop.
 
-1. Python 3.10+ and [uv](https://docs.astral.sh/uv/)
-2. The datasets above, downloaded into `data/raw/`
-3. An MCP-compatible AI assistant, e.g. Claude Desktop
+1. Download the datasets listed under [Data sources](#data-sources) by hand and save them in `data/raw/`, keeping their file names. Save each dataset's description file (`…_md.md`) too: UNSpeaks reads the version and citation from it.
+2. Build the local database (takes a few seconds):
+   ```
+   cd UNSpeaksCode
+   uv run unspeaks-build-db
+   ```
+3. Add the server to your AI assistant. See [UNSpeaksCode/README.md](UNSpeaksCode/README.md) for the Claude Desktop settings.
 
 ---
 
