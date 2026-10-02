@@ -32,6 +32,16 @@ def data_dir() -> Path:
     return Path(__file__).resolve().parents[3] / "data"
 
 
+def raw_data_dir() -> Path:
+    """Where the hand-downloaded datasets go (data/raw/)."""
+    return data_dir() / "raw"
+
+
+def database_path() -> Path:
+    """The SQLite database built from the datasets by `uv run unspeaks-build-db`."""
+    return data_dir() / "unspeaks.sqlite"
+
+
 def user_agent() -> str:
     """An honest User-Agent: who we are and where to find us.
 
