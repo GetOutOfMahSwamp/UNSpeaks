@@ -25,7 +25,7 @@ from unspeaks.documents import (
     DocumentService,
 )
 from unspeaks.ods_client import OdsError
-from unspeaks.votes.models import SearchVotesResult, VotingRecord
+from unspeaks.votes.models import MemberProfile, SearchVotesResult, VotingRecord
 from unspeaks.votes.service import VotingLookupError, VotingService
 from unspeaks.votes.store import DataNotLoadedError
 
@@ -37,9 +37,9 @@ UNSpeaks gives you access to official United Nations information.
   that the tools return.
 - Documents are downloaded from UN servers on demand, within strict rate limits.
   Only fetch documents you actually need, and read long documents a few pages at a time.
-- Voting data comes from datasets of the UN Dag Hammarskjöld Library. They end at a
-  certain date (see `data_until` in each answer); say so when a question is about
-  something more recent.
+- Voting and Member State data come from datasets of the UN Dag Hammarskjöld Library.
+  They end at a certain date (see `data_until` in each answer); say so when a question
+  is about something more recent.
 - UNSpeaks is an independent project, not affiliated with or endorsed by the UN.
 """
 
@@ -189,6 +189,47 @@ def get_voting_record(
     """
     try:
         return get_voting().get_record(symbol, member=member, include_votes=include_member_votes)
+    except VOTING_ERRORS as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool(title="Get a UN Member State", annotations=LOCAL_READ_ONLY)
+def get_member_state(
+    member: Annotated[
+        str,
+        Field(description="A Member State, current or former: a name in any common form ('Netherlands', "
+              "'Türkiye', 'Ivory Coast', 'USSR', 'West Germany') or a code ('NLD')."),
+    ],
+    include_representatives: Annotated[
+        bool,
+        Field(description="Set to false to leave out the list of its Permanent Representatives."),
+    ] = True,
+) -> MemberProfile:
+    """Facts about a UN Member State: its names over time, codes, membership dates, the states
+    it came from or became, how it took part in General Assembly and Security Council votes,
+    and the heads of its Permanent Mission in New York.
+
+    Based on the UN Dag Hammarskjöld Library's datasets. Use it to:
+    - answer who a Member State is: official names (also in French, Spanish, Arabic, Chinese,
+      Russian), ISO and M49 codes, founding member or the resolution that admitted it
+      (`details`; read that resolution with get_document)
+    - follow name changes and successor states: 'Turkey' became 'Türkiye' (`names`); the USSR
+      was continued by the Russian Federation (`related`, each with its own code and votes)
+    - see when it sat on the Security Council: `participation` for 'UNSC', `years`
+    - see how often it voted yes, no or abstained, and since when
+    - list its Permanent Representatives, past and present
+
+    Good to know:
+    - The Permanent Representatives data has no dates, so it can't tell who is in office now.
+      Never present someone as the current representative; give the dated roles and
+      `recorded_as` as clues, and say where to check (see the note in `representatives`).
+    - Names are shown as in the UN data. Only Member States are included, not observer States.
+    - The data ends at `sources[].data_until`. Cite `sources` when you use it.
+
+    Use search_votes with the same member to see how it voted on a topic.
+    """
+    try:
+        return get_voting().get_member(member, include_representatives=include_representatives)
     except VOTING_ERRORS as exc:
         raise ToolError(str(exc)) from exc
 

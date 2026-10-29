@@ -19,7 +19,9 @@ class SourceInfo(BaseModel):
     title: str
     version: str | None = None
     url: str | None = None
-    data_until: str | None = Field(None, description="Date of the newest record in this dataset")
+    data_until: str | None = Field(
+        None, description="How recent the data is: the date of its newest record, or when it was published"
+    )
     citation: str = Field(description="Include this citation when you use the data")
     terms: str | None = None
 
@@ -71,6 +73,86 @@ class DecisionSummary(BaseModel):
     totals: VoteTotals | None = None
     member_vote: str | None = Field(None, description="How the requested member voted")
     record_url: str | None = None
+
+
+class NameInUse(BaseModel):
+    name: str
+    current: bool = Field(description="True for the name in use today")
+    periods: list[str] = Field(description="When the name was used, e.g. '1945-10-24 to 2023-03-02' or 'since 2023-03-03'")
+    note: str | None = Field(None, description="Remarks from the data source, e.g. why the name changed")
+
+
+class RelatedMember(BaseModel):
+    code: str = Field(description="Use it with the other tools, e.g. search_votes(member=code)")
+    name: str
+    relation: str = Field(description="'earlier' (it came from this member) or 'later' (it became this member)")
+    via: str | None = Field(None, description="The name that links them, if it differs from `name`")
+
+
+class Participation(BaseModel):
+    body_id: str
+    body: str
+    recorded_votes: int = Field(description="Number of recorded votes it was listed in")
+    votes: dict[str, int] = Field(description="How often it voted yes / no / abstain / non_voting")
+    first_vote: str | None = None
+    last_vote: str | None = None
+    years: list[str] = Field(
+        description="Years with recorded votes it was listed in, e.g. ['1946', '1951-1952']. For a body "
+        "with elected seats, such as the Security Council, these are the years it had a seat. A gap can "
+        "also mean the body held no recorded votes that year (the General Assembly had none in 1964)."
+    )
+    names_used: list[str] = Field(description="Its names as recorded in these votes")
+    labels: list[str] = Field(default_factory=list, description="Extra info recorded with its votes, e.g. 'permanent member'")
+
+
+class Representative(BaseModel):
+    name: str = Field(description="As recorded: 'Last name, first name'")
+    salutation: str | None = Field(None, description="As used in UN documents, e.g. 'Ms.'")
+    roles: list[str] = Field(
+        default_factory=list,
+        description="Functions as recorded, some with a date, e.g. 'Security Council President (Mar. 2018)'",
+    )
+    recorded_as: list[str] | None = Field(
+        None,
+        description="The member's name(s) in this person's record. Only given when the member has had "
+        "more than one name: it tells under which name(s), and so roughly when, the person served.",
+    )
+    other_names: list[str] = Field(default_factory=list, description="Other forms of the person's name")
+    record_url: str | None = None
+
+
+class RepresentativeGroup(BaseModel):
+    role: str = Field(description="e.g. 'Permanent Representative'")
+    total: int
+    people: list[Representative] = Field(description="In alphabetical order, not by date")
+    note: str | None = Field(None, description="What this data does and doesn't cover")
+
+
+class MemberProfile(BaseModel):
+    code: str = Field(description="The member's code in the voting data, usually its ISO 3166 code")
+    name: str = Field(description="Its name today, or the last name of a former member")
+    status: str | None = Field(None, description="'current member' or 'former member'")
+    member_since: str | None = Field(None, description="Start of its first name in the records (YYYY-MM-DD)")
+    member_until: str | None = Field(None, description="Only for former members: end of its last name (YYYY-MM-DD)")
+    names: list[NameInUse] = Field(default_factory=list, description="Every name it was known by, oldest first")
+    related: list[RelatedMember] = Field(
+        default_factory=list,
+        description="Members it came from or became, e.g. USSR -> Russian Federation. Each has its own "
+        "code and votes.",
+    )
+    details: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Source-specific details, e.g. ISO and M49 codes, founding member, membership "
+        "resolution, names in other UN languages, UN Thesaurus term",
+    )
+    participation: list[Participation] = Field(
+        default_factory=list, description="How it took part in recorded votes, per body"
+    )
+    representatives: list[RepresentativeGroup] | None = Field(
+        None, description="People who represented it, per role. null when not requested."
+    )
+    record_url: str | None = Field(None, description="The official record of this member")
+    sources: list[SourceInfo]
 
 
 class SearchVotesResult(BaseModel):

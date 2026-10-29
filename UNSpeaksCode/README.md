@@ -15,11 +15,12 @@ src/unspeaks/
 ├── config.py        # settings (data folder, limits, User-Agent)
 ├── build_db.py      # `unspeaks-build-db`: builds data/unspeaks.sqlite from data/raw/
 ├── votes/           # GENERIC voting layer: works for any assembly or parliament
-│   ├── store.py     #   SQLite schema, writing and reading (bodies, decisions, members, votes)
+│   ├── store.py     #   SQLite schema, writing and reading (bodies, decisions, members, votes,
+│   │                #   member profiles, representatives)
 │   ├── service.py   #   look-ups and search used by the tools
 │   └── models.py    #   what the voting tools return
 └── sources/         # one loader per data source: everything source-specific lives here
-    └── undl.py      #   UN Dag Hammarskjöld Library datasets (GA, SC, Member State names)
+    └── undl.py      #   UN Dag Hammarskjöld Library datasets (GA, SC, Member States, Permanent Representatives)
 scripts/try_ods.py   # try a download by hand, without MCP
 tests/               # offline tests (fake ODS, tiny copies of the UN datasets)
 ```
@@ -72,3 +73,7 @@ Then restart Claude Desktop completely.
 | `get_document` | Text of a UN document by symbol (e.g. `A/RES/78/1`), a few pages at a time, with a citation |
 | `get_voting_record` | How a GA or SC resolution was adopted, totals, and how each member voted (optionally highlighting one) |
 | `search_votes` | Find resolutions by words, body, date, session or adoption method, or how one Member State voted |
+| `get_member_state` | A Member State's names over time, codes, membership dates, related states, Security Council years, vote counts and Permanent Representatives |
+
+After pulling a new version, run `uv run unspeaks-build-db` again if the database schema changed
+(`get_member_state` says so when it did), then restart Claude Desktop.

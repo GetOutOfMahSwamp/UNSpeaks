@@ -38,6 +38,7 @@ def test_build_loads_every_dataset(database):
     _, summary = database
     assert summary == {
         "ga_resolutions": 5, "ga_votes": 12, "sc_resolutions": 2, "sc_votes": 3, "members": 4,
+        "representatives": 3,
     }
 
 

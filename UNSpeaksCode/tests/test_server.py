@@ -109,6 +109,23 @@ async def test_search_votes_tool(voting_db):
 
 
 @pytest.mark.anyio
+async def test_get_member_state_tool(voting_db):
+    async with Client(server.mcp) as client:
+        tools = {t.name: t for t in (await client.list_tools()).tools}
+        found = await client.call_tool("get_member_state", {"member": "Pays-Bas (Royaume des)"})
+        unknown = await client.call_tool("get_member_state", {"member": "Atlantis"})
+    tool = tools["get_member_state"]
+    assert tool.input_schema["required"] == ["member"]
+    assert tool.annotations.read_only_hint is True and tool.output_schema is not None
+    assert "no dates" in tool.description
+    assert found.is_error is False
+    data = found.structured_content
+    assert data["code"] == "NLD" and data["status"] == "current member"
+    assert data["representatives"][0]["total"] == 2
+    assert unknown.is_error is True and "No member matches" in unknown.content[0].text
+
+
+@pytest.mark.anyio
 async def test_voting_errors_reach_the_ai(voting_db):
     async with Client(server.mcp) as client:
         unknown = await client.call_tool("get_voting_record", {"symbol": "A/RES/99/999"})

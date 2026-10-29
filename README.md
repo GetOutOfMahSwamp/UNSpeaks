@@ -8,7 +8,7 @@ It connects AI assistants such as Claude to data published by the UN Dag Hammars
 - *"Which Security Council resolutions were adopted without a vote in 2025?"*
 - *"Who represents Brazil at the UN, and who spoke for Brazil in the general debate?"*
 
-> **Status: early development.** This is a student project. The first three tools work (see [Tools](#tools)); more are planned.
+> **Status: early development.** This is a student project. Four tools work (see [Tools](#tools)); more are planned.
 
 UNSpeaks is an independent project. It is **not affiliated with, endorsed by or sponsored by the United Nations** or the Dag Hammarskjöld Library.
 
@@ -31,7 +31,7 @@ AI assistant  ──MCP──▶  UNSpeaks server  ──▶  local SQLite datab
 - [x] `get_document`: the text of a UN document by its symbol (e.g. `A/RES/78/1`), a few pages at a time, fetched on demand from the Official Document System
 - [x] `get_voting_record`: how a General Assembly or Security Council resolution was adopted and how each Member State voted
 - [x] `search_votes`: find resolutions by topic, date, session or adoption method, or see how one Member State voted
-- [ ] `get_member_state`: names, codes, membership dates and representatives of a Member State
+- [x] `get_member_state`: a Member State's names over time, codes, membership dates, predecessor and successor states, Security Council terms and Permanent Representatives
 - [ ] `find_speakers`: who spoke in the General Assembly general debate, by session or Member State
 
 The voting tools are built on a generic core (bodies, decisions, members, votes), with everything UN-specific in a separate loader, so the same tools could later serve another assembly or parliament.
@@ -103,6 +103,9 @@ Each dataset's record page gives the exact citation.
 - **Adopted resolutions only.** The voting data leaves out votes on drafts that failed and votes on individual paragraphs.
 - **Not every resolution has a vote.** About three quarters of General Assembly resolutions were adopted without a recorded vote, so there are no country-by-country votes for them. That is how they were adopted, not missing data.
 - **Security Council adoptions without a vote.** For resolutions adopted without a vote or by acclamation, the current data (v6) records every member as "X" (non-voting), with `modality` set to "Without Vote". The dataset description says "Y" instead, so UNSpeaks relies on the `modality` field and never presents these as abstentions or absences.
+- **Permanent Representatives have no dates.** The dataset lists current and past heads of mission, but not when they served, so UNSpeaks can't say who is in office now. Dated roles (such as "Security Council President (Mar. 2018)") and the country name a person served under are given as clues.
+- **Security Council terms are derived from the votes.** The years in which a Member State took part in recorded Security Council votes are shown as the years it had a seat.
+- **Permanent Representatives citation.** The Library's description file for this dataset cites record 4047618, which is the Security Council representatives dataset. UNSpeaks cites the dataset's own record, [4091498](https://digitallibrary.un.org/record/4091498), instead.
 - **AI can make mistakes.** Check important answers against the linked UN records.
 
 The data is provided by the UN "as is", without warranty. The designations used and the presentation of material do not imply any opinion of the United Nations, or of this project, on the legal status of any country, territory or area, or of its authorities.
@@ -124,7 +127,7 @@ UNSpeaks/
 
 You need Python 3.13+, [uv](https://docs.astral.sh/uv/) and an MCP-compatible AI assistant such as Claude Desktop.
 
-1. Download the datasets listed under [Data sources](#data-sources) by hand and save them in `data/raw/`, keeping their file names. Save each dataset's description file (`…_md.md`) too: UNSpeaks reads the version and citation from it.
+1. Download the datasets listed under [Data sources](#data-sources) by hand and save them in `data/raw/`, keeping their file names. Save each dataset's description file (`.md`) too, with a name that starts with the same date (for example `2026_08_17_UN_member_states.md`): UNSpeaks reads the version, publication date and citation from it.
 2. Build the local database (takes a few seconds):
    ```
    cd UNSpeaksCode

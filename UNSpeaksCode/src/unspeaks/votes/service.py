@@ -5,17 +5,24 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections import Counter
 
 from unspeaks import config
 from unspeaks.votes.models import (
     DecisionSummary,
+    MemberProfile,
     MemberVote,
+    NameInUse,
+    Participation,
+    RelatedMember,
+    Representative,
+    RepresentativeGroup,
     SearchVotesResult,
     SourceInfo,
     VoteTotals,
     VotingRecord,
 )
-from unspeaks.votes.store import VOTE_VALUES, VoteStore
+from unspeaks.votes.store import VOTE_VALUES, DataNotLoadedError, VoteStore
 
 EXPLANATIONS = {
     "recorded vote": "Adopted by a recorded vote: how each {member} voted is listed in `votes`.",
@@ -179,6 +186,97 @@ class VotingService:
             sources=self._sources(source_ids),
         )
 
+    # --- one member --------------------------------------------------------------------
+
+    def get_member(self, member: str, include_representatives: bool = True) -> MemberProfile:
+        """Who a member is: its names over time, membership dates, the members it came from
+        or became, how it took part in recorded votes and, if wanted, who represented it."""
+        if int(self.store.meta("schema_version") or 0) < 3:
+            raise DataNotLoadedError(
+                "The database was built by an older version of UNSpeaks and has no member profiles "
+                "yet. Run `uv run unspeaks-build-db` in the UNSpeaksCode folder again."
+            )
+        code, _ = self._resolve_member(member)
+        profile = self.store.member_profile(code)
+        names = json.loads(profile["names"]) if profile["names"] else []
+        source_ids: list[str | None] = [profile["source_id"]]
+        participation = self._participation(code, source_ids)
+        representatives = None
+        if include_representatives:
+            # Which of its names a person served under only says something if it had several.
+            representatives = self._representatives(code, len(names) > 1, source_ids)
+
+        return MemberProfile(
+            code=code,
+            name=profile["name"],
+            status={1: "current member", 0: "former member"}.get(profile["is_current"]),
+            member_since=profile["member_since"],
+            member_until=profile["member_until"],
+            names=[
+                NameInUse(name=entry["name"], current=entry["current"],
+                          periods=[_period(start, end) for start, end in entry["periods"]],
+                          note=entry.get("note"))
+                for entry in names
+            ],
+            related=[RelatedMember(**entry) for entry in json.loads(profile["related"] or "[]")],
+            details=json.loads(profile["details"]) if profile["details"] else {},
+            participation=participation,
+            representatives=representatives,
+            record_url=profile["record_url"],
+            sources=self._sources(source_ids),
+        )
+
+    def _participation(self, code: str, source_ids: list[str | None]) -> list[Participation]:
+        bodies: dict[str, dict] = {}
+        for row in self.store.member_participation(code):
+            body = bodies.setdefault(row["body_id"], dict(
+                votes=Counter(), years=set(), names=set(), labels=set(), dates=[]))
+            body["votes"][row["vote"]] += row["n"]
+            if row["year"]:
+                body["years"].add(int(row["year"]))
+            body["names"].add(row["name"])
+            if row["label"]:
+                body["labels"].add(row["label"])
+            body["dates"] += [row["first_date"], row["last_date"]]
+            source_ids.append(row["votes_source_id"])
+
+        result = []
+        for body_id, body in bodies.items():
+            info = self.store.body(body_id)
+            dates = [d for d in body["dates"] if d]
+            result.append(Participation(
+                body_id=body_id,
+                body=info["name"] if info else body_id,
+                recorded_votes=sum(body["votes"].values()),
+                votes={value: body["votes"][value] for value in VOTE_VALUES if body["votes"][value]},
+                first_vote=min(dates, default=None),
+                last_vote=max(dates, default=None),
+                years=_year_ranges(body["years"]),
+                names_used=sorted(body["names"]),
+                labels=sorted(body["labels"]),
+            ))
+        return result
+
+    def _representatives(self, code: str, show_recorded_as: bool,
+                         source_ids: list[str | None]) -> list[RepresentativeGroup]:
+        groups: dict[str, RepresentativeGroup] = {}
+        for row in self.store.representatives(code):
+            group = groups.get(row["role"])
+            if group is None:
+                group = groups[row["role"]] = RepresentativeGroup(
+                    role=row["role"], total=0, people=[], note=row["role_notes"])
+                source_ids.append(row["role_source_id"])
+            group.people.append(Representative(
+                name=row["name"],
+                salutation=row["salutation"],
+                roles=_json_list(row["notes"]),
+                recorded_as=_json_list(row["recorded_as"]) if show_recorded_as else None,
+                other_names=_json_list(row["other_names"]),
+                record_url=row["record_url"],
+            ))
+            group.total += 1
+        return list(groups.values())
+
     # --- helpers -----------------------------------------------------------------------
 
     def _resolve_member(self, text: str) -> tuple[str, str]:
@@ -245,6 +343,30 @@ def _totals(row: sqlite3.Row) -> VoteTotals | None:
         members=row["total_members"],
     )
     return totals if any(v is not None for v in totals.model_dump().values()) else None
+
+
+def _period(start: str | None, end: str | None) -> str:
+    """('1945-10-24', '2023-03-02') -> '1945-10-24 to 2023-03-02'; ('2023-03-03', None) -> 'since 2023-03-03'."""
+    if start and end:
+        return f"{start} to {end}"
+    if start:
+        return f"since {start}"
+    return f"until {end}" if end else "unknown"
+
+
+def _year_ranges(years: set[int]) -> list[str]:
+    """{1946, 1951, 1952, 2018} -> ['1946', '1951-1952', '2018']"""
+    ranges: list[list[int]] = []
+    for year in sorted(years):
+        if ranges and year == ranges[-1][1] + 1:
+            ranges[-1][1] = year
+        else:
+            ranges.append([year, year])
+    return [str(first) if first == last else f"{first}-{last}" for first, last in ranges]
+
+
+def _json_list(value: str | None) -> list[str]:
+    return json.loads(value) if value else []
 
 
 def _shorten(text: str | None, limit: int = 200) -> str | None:
