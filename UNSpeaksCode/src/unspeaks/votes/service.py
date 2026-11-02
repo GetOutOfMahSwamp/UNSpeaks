@@ -188,7 +188,7 @@ class VotingService:
 
     # --- one member --------------------------------------------------------------------
 
-    def get_member(self, member: str, include_representatives: bool = True) -> MemberProfile:
+    def get_member(self, member: str, include_representatives: bool = False) -> MemberProfile:
         """Who a member is: its names over time, membership dates, the members it came from
         or became, how it took part in recorded votes and, if wanted, who represented it."""
         if int(self.store.meta("schema_version") or 0) < 3:

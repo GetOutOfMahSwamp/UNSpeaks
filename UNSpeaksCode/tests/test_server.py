@@ -113,15 +113,19 @@ async def test_get_member_state_tool(voting_db):
     async with Client(server.mcp) as client:
         tools = {t.name: t for t in (await client.list_tools()).tools}
         found = await client.call_tool("get_member_state", {"member": "Pays-Bas (Royaume des)"})
+        with_people = await client.call_tool(
+            "get_member_state", {"member": "NLD", "include_representatives": True})
         unknown = await client.call_tool("get_member_state", {"member": "Atlantis"})
     tool = tools["get_member_state"]
     assert tool.input_schema["required"] == ["member"]
+    assert tool.input_schema["properties"]["include_representatives"]["default"] is False
     assert tool.annotations.read_only_hint is True and tool.output_schema is not None
     assert "no dates" in tool.description
     assert found.is_error is False
     data = found.structured_content
     assert data["code"] == "NLD" and data["status"] == "current member"
-    assert data["representatives"][0]["total"] == 2
+    assert data["representatives"] is None  # off unless asked for
+    assert with_people.structured_content["representatives"][0]["total"] == 2
     assert unknown.is_error is True and "No member matches" in unknown.content[0].text
 
 

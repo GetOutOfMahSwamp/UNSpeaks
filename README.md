@@ -32,7 +32,7 @@ AI assistant  ──MCP──▶  UNSpeaks server  ──▶  local SQLite datab
 - [x] `get_voting_record`: how a General Assembly or Security Council resolution was adopted and how each Member State voted
 - [x] `search_votes`: find resolutions by topic, date, session or adoption method, or see how one Member State voted
 - [x] `get_member_state`: a Member State's names over time, codes, membership dates, predecessor and successor states, Security Council terms and Permanent Representatives
-- [ ] `find_speakers`: who spoke in the General Assembly general debate, by session or Member State
+- [ ] `search_people`: find people who spoke or acted for a Member State (general debate speakers, Permanent Representatives, Security Council representatives and presidents) by name, Member State, role or General Assembly session
 
 The voting tools are built on a generic core (bodies, decisions, members, votes), with everything UN-specific in a separate loader, so the same tools could later serve another assembly or parliament.
 

@@ -69,9 +69,9 @@ def test_profile_of_a_current_member(service):
     assert member.details["names_in_other_languages"] == {"fr": "Pays-Bas (Royaume des)"}
     assert member.details["thesaurus_term"] == "NETHERLANDS (KINGDOM OF THE)"
     assert member.record_url == "https://digitallibrary.un.org/record/4006039"
+    assert member.representatives is None  # only when asked for
     assert [s.title for s in member.sources] == [
         "United Nations Member States", "General Assembly Voting Data", "Security Council Voting Data",
-        "United Nations Permanent Representatives",
     ]
 
 
@@ -148,7 +148,7 @@ def test_year_ranges():
 
 
 def test_permanent_representatives(service):
-    (group,) = service.get_member("Netherlands").representatives
+    (group,) = service.get_member("Netherlands", include_representatives=True).representatives
     assert (group.role, group.total) == ("Permanent Representative", 2)
     assert "no dates" in group.note
     lise, karel = group.people  # alphabetical, not by date
@@ -160,24 +160,24 @@ def test_permanent_representatives(service):
 
 
 def test_recorded_as_only_when_the_member_had_several_names(service):
-    (moynihan,) = service.get_member("USA").representatives[0].people
+    (moynihan,) = service.get_member("USA", include_representatives=True).representatives[0].people
     assert moynihan.recorded_as is None
 
 
 def test_a_representative_of_two_members(service):
     for name in ("USSR", "Russian Federation"):
-        people = service.get_member(name).representatives[0].people
+        people = service.get_member(name, include_representatives=True).representatives[0].people
         assert [person.name for person in people] == ["Vorontsov, Yuli M."]
 
 
 def test_members_without_representatives(service):
-    assert service.get_member("KOR").representatives == []
+    assert service.get_member("KOR", include_representatives=True).representatives == []
 
 
-def test_representatives_can_be_left_out(service):
-    member = service.get_member("NLD", include_representatives=False)
-    assert member.representatives is None
-    assert "United Nations Permanent Representatives" not in [s.title for s in member.sources]
+def test_representatives_are_cited_when_included(service):
+    member = service.get_member("NLD", include_representatives=True)
+    assert member.sources[-1].title == "United Nations Permanent Representatives"
+    assert member.sources[-1].url == "https://digitallibrary.un.org/record/4091498"
 
 
 # --- building -----------------------------------------------------------------------
