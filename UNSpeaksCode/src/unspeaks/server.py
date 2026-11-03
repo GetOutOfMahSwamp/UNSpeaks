@@ -202,9 +202,8 @@ def get_member_state(
     ],
     include_representatives: Annotated[
         bool,
-        Field(description="Set to true to add its Permanent Representatives, past and present. Only "
-              "when the question is about them: the list can be long (30+ people)."),
-    ] = False,
+        Field(description="Set to false to leave out the list of its Permanent Representatives."),
+    ] = True,
 ) -> MemberProfile:
     """Facts about a UN Member State: its names over time, codes, membership dates, the states
     it came from or became, how it took part in General Assembly and Security Council votes,
@@ -218,7 +217,7 @@ def get_member_state(
       was continued by the Russian Federation (`related`, each with its own code and votes)
     - see when it sat on the Security Council: `participation` for 'UNSC', `years`
     - see how often it voted yes, no or abstained, and since when
-    - list its Permanent Representatives, past and present: set include_representatives=true
+    - list its Permanent Representatives, past and present
 
     Good to know:
     - The Permanent Representatives data has no dates, so it can't tell who is in office now.
