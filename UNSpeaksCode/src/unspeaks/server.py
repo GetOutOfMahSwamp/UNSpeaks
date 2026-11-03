@@ -204,7 +204,7 @@ def get_member_state(
         bool,
         Field(description="Set to true to add its Permanent Representatives, past and present. Only "
               "when the question is about them: the list can be long (30+ people)."),
-    ] = False,
+    ] = True,
 ) -> MemberProfile:
     """Facts about a UN Member State: its names over time, codes, membership dates, the states
     it came from or became, how it took part in General Assembly and Security Council votes,
