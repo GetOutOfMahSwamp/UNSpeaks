@@ -37,9 +37,9 @@ UNSpeaks gives you access to official United Nations information.
   that the tools return.
 - Documents are downloaded from UN servers on demand, within strict rate limits.
   Only fetch documents you actually need, and read long documents a few pages at a time.
-- Voting and Member State data come from datasets of the UN Dag Hammarskjöld Library.
-  They end at a certain date (see `data_until` in each answer); say so when a question
-  is about something more recent.
+- Voting and Member State data come from the UN Dag Hammarskjöld Library and are
+  downloaded by hand from time to time, so they end at a certain date (see `data_until`
+  in each answer); say so when a question is about something more recent.
 - UNSpeaks is an independent project, not affiliated with or endorsed by the UN.
 """
 
@@ -123,7 +123,7 @@ def search_votes(
 ) -> SearchVotesResult:
     """Search adopted UN General Assembly and Security Council resolutions and how they were adopted.
 
-    Based on the UN Dag Hammarskjöld Library's voting datasets. Use it to:
+    Based on the UN Dag Hammarskjöld Library's voting data. Use it to:
     - find resolutions on a topic: query='nuclear weapons', body='UNGA'
     - see how a Member State voted: member='Netherlands', optionally with query, dates,
       or position='no' to find the resolutions it voted against
@@ -177,7 +177,9 @@ def get_voting_record(
 
     - `adoption_method` tells how it was adopted. For 'without a vote' (most General Assembly
       resolutions) or 'non-recorded vote' there are no individual votes: say so, it is not
-      missing data.
+      missing data. A non-recorded vote can still have totals.
+    - If there is a `details.date_note`, the Library recorded two dates for this vote:
+      mention it when the exact day matters.
     - 'non_voting' means the member was recorded as not voting (for example absent); the
       data does not say why.
     - Names are as recorded at the time of the vote.
