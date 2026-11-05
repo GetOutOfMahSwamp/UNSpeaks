@@ -1,31 +1,42 @@
-"""Loader for the UN Dag Hammarskjöld Library datasets.
+"""Loader for the UN Dag Hammarskjöld Library's voting data and datasets.
 
 Reads the files you downloaded by hand into data/raw/ (we never download them
-automatically: see the README, "Terms of use"). For each dataset the newest file
-is used; file names start with their date, e.g. 2026_02_06_ga_voting.csv.
+automatically: see the README, "Terms of use").
 
+Voting data. For each body the Library's weekly MARCXML archive is used when it is in
+data/raw/ (unzipped or still as .xml.gz); otherwise its CSV datasets:
+- all_voting_data_general_assembly.xml  General Assembly: one record per resolution,
+                                        with every Member State's vote for recorded votes
+- all_voting_data_security_council.xml  Security Council: the same
 - *_ga_outcomes.csv  General Assembly resolutions (one row per resolution,
                      including those adopted without a vote)
 - *_ga_voting.csv    General Assembly voting data (one row per Member State per vote)
 - *_sc_voting.csv    Security Council voting data (one row per member per resolution)
+
+Members (always CSV datasets):
 - *_unms_names.csv   UN Member States, all their names, with dates and codes: used for
                      get_member_state, and to recognise a country however it's written
                      ('Netherlands', 'Pays-Bas', 'NLD', ...)
 - *_ambassadors.csv  Permanent Representatives: heads of the Member States' missions
 
-The Library's description files (saved next to the CSVs, see find_description) are read
-for the version, the publication date and the exact citation. When you download a newer
-version, rebuild the database and the citations update automatically.
+For each CSV dataset the newest file is used; file names start with their date, e.g.
+2026_02_06_ga_voting.csv. The Library's description files (saved next to the CSVs, see
+find_description) are read for the version, the publication date and the exact citation.
+The archives keep the Library's file names, so their download date for the citation is
+the file's modification date. When you download newer files, rebuild the database and the
+citations update automatically.
 """
 
 from __future__ import annotations
 
 import csv
+import gzip
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 from unspeaks.votes.store import VoteWriter, normalize_name
 
@@ -45,7 +56,8 @@ BODIES = {
             "Covers resolutions adopted by the General Assembly in its regular, special and "
             "emergency special sessions. Most resolutions are adopted without a vote; for those "
             "there are no individual votes, which reflects how they were adopted, not missing data. "
-            "Individual votes exist only for resolutions adopted by recorded vote. Drafts that "
+            "Individual votes exist only for resolutions adopted by recorded vote; for a "
+            "non-recorded vote there are at most the totals. Drafts that "
             "were not adopted and votes on separate paragraphs are not included. 'non_voting' "
             "means the Member State was recorded as not voting (for example because it was absent)."
         ),
@@ -78,6 +90,29 @@ DATASETS = {
     "unms_names": Dataset("unms_names", "United Nations Member States", "https://digitallibrary.un.org/record/4082085"),
     "ambassadors": Dataset("ambassadors", "United Nations Permanent Representatives", "https://digitallibrary.un.org/record/4091498"),
 }
+
+
+@dataclass(frozen=True)
+class Archive:
+    """A weekly MARCXML export of the Library's voting records for one body."""
+
+    body_id: str
+    title: str
+    file_name: str  # as unzipped; the download itself has '.gz' added
+    url: str  # where to download it by hand (bot protection: never automatically)
+    replaces: tuple[str, ...]  # the CSV datasets it replaces
+
+
+EXPORT_URL = "https://digitallibrary.un.org/export/marcxml/"
+ARCHIVES = {
+    "ga_marcxml": Archive(GA, "General Assembly voting data (weekly MARCXML export)",
+                          "all_voting_data_general_assembly.xml",
+                          EXPORT_URL + "all_voting_data_general_assembly.xml.gz", ("ga_outcomes", "ga_voting")),
+    "sc_marcxml": Archive(SC, "Security Council voting data (weekly MARCXML export)",
+                          "all_voting_data_security_council.xml",
+                          EXPORT_URL + "all_voting_data_security_council.xml.gz", ("sc_voting",)),
+}
+RECORD_URL = "https://digitallibrary.un.org/record/{}"
 
 VOTES = {"Y": "yes", "N": "no", "A": "abstain", "X": "non_voting"}
 GA_METHODS = {
@@ -150,6 +185,27 @@ def read_source_info(kind: str, csv_path: Path, log: Callable[[str], None] = lam
     return info
 
 
+def find_archive(raw_dir: Path, archive: Archive) -> Path | None:
+    """The archive under its own name, unzipped (.xml) or as downloaded (.xml.gz). If both
+    are there, the one modified last."""
+    folder = Path(raw_dir)
+    candidates = [path for path in (folder / archive.file_name, folder / f"{archive.file_name}.gz")
+                  if path.is_file()]
+    return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
+
+
+def archive_source_info(archive: Archive, path: Path) -> dict:
+    """Title and citation of an archive. The Library accepts the archive's link plus the
+    download date, which is the file's modification date (its name has no date)."""
+    downloaded_on = date.fromtimestamp(path.stat().st_mtime).isoformat()
+    return dict(
+        title=archive.title,
+        citation=f"{PUBLISHER}, {archive.title}, United Nations, downloaded from {archive.url}, {downloaded_on}",
+        record_url=archive.url,
+        downloaded_on=downloaded_on,
+    )
+
+
 class _Names:
     """Collects every name seen for each member code, and the most recent one."""
 
@@ -164,11 +220,29 @@ class _Names:
 
 
 def load(writer: VoteWriter, raw_dir: Path, log: Callable[[str], None] = lambda message: None) -> dict:
-    """Load every UN dataset found in raw_dir. Returns counts per dataset."""
+    """Load every UN dataset found in raw_dir. Returns counts per dataset.
+
+    The voting data of each body comes from its weekly archive if that is in raw_dir, and
+    otherwise from its CSV datasets, so the General Assembly can come from the archive while
+    the Security Council still comes from a CSV."""
     raw_dir = Path(raw_dir)
     summary: dict[str, int] = {}
     files = {kind: find_file(raw_dir, kind) for kind in DATASETS}
+    archives = {kind: find_archive(raw_dir, archive) for kind, archive in ARCHIVES.items()}
+    for kind, path in archives.items():
+        for replaced in ARCHIVES[kind].replaces if path else ():
+            if files[replaced]:
+                log(f"Not using {files[replaced].name}: {path.name} replaces it.")
+                files[replaced] = None
 
+    for kind, path in archives.items():
+        if path:
+            info = archive_source_info(ARCHIVES[kind], path)
+            writer.add_source(
+                f"undl:{kind}", title=info["title"], citation=info["citation"], publisher=PUBLISHER,
+                record_url=info["record_url"], file_name=path.name, downloaded_on=info["downloaded_on"],
+                terms=TERMS,
+            )
     for kind, path in files.items():
         if path:
             info = read_source_info(kind, path, log)
@@ -179,7 +253,12 @@ def load(writer: VoteWriter, raw_dir: Path, log: Callable[[str], None] = lambda 
             )
 
     names = _Names()
-    if files["ga_outcomes"] or files["ga_voting"]:
+    if archives["ga_marcxml"]:
+        writer.add_body(GA, **BODIES[GA])
+        log(f"Reading {archives['ga_marcxml'].name} (large file, this takes a little while) ...")
+        summary["ga_resolutions"], summary["ga_votes"] = _load_archive(
+            writer, archives["ga_marcxml"], GA, "undl:ga_marcxml", names, log)
+    elif files["ga_outcomes"] or files["ga_voting"]:
         writer.add_body(GA, **BODIES[GA])
         decision_ids: dict[str, int] = {}
         if files["ga_outcomes"]:
@@ -189,7 +268,12 @@ def load(writer: VoteWriter, raw_dir: Path, log: Callable[[str], None] = lambda 
             log(f"Reading {files['ga_voting'].name} (large file, this takes a little while) ...")
             summary["ga_votes"] = _load_ga_votes(writer, files["ga_voting"], decision_ids, names)
 
-    if files["sc_voting"]:
+    if archives["sc_marcxml"]:
+        writer.add_body(SC, **BODIES[SC])
+        log(f"Reading {archives['sc_marcxml'].name} ...")
+        summary["sc_resolutions"], summary["sc_votes"] = _load_archive(
+            writer, archives["sc_marcxml"], SC, "undl:sc_marcxml", names, log)
+    elif files["sc_voting"]:
         writer.add_body(SC, **BODIES[SC])
         log(f"Reading {files['sc_voting'].name} ...")
         summary["sc_resolutions"], summary["sc_votes"] = _load_sc(writer, files["sc_voting"], names)
@@ -328,6 +412,195 @@ def _load_sc(writer: VoteWriter, path: Path, names: _Names) -> tuple[int, int]:
         batch.append((decision_id, writer.member_id(SC, code, name), VOTES.get(raw, "non_voting"), raw, label))
     writer.add_votes(batch)
     return len(decision_ids), len(batch)
+
+
+# --- Weekly MARCXML archives (General Assembly and Security Council) ----------------
+#
+# One MARC record per adopted resolution. The fields used were checked against the CSV
+# datasets, which were made from the same records:
+#   001      record id: https://digitallibrary.un.org/record/<id>
+#   791      $a resolution symbol; $c General Assembly session ('80', '10emsp', '29sp');
+#            $z on divided resolutions: the symbol before division (A/RES/38/35 for 38/35A)
+#   245      title
+#   992 $a   date. 269 $a is the same date in nearly every record, but not in all, and
+#            newer records lack it; when it differs, details.date_note gives both.
+#   590 $a   'Vote' or 'Without Vote'. A vote without 967 fields is a non-recorded vote.
+#   967      one field per member: $c code, $e name, $d Y / N / A / X (blank: not voting);
+#            Security Council: $b P = permanent member, R = elected member
+#   996      totals: $b yes, $c no, $d abstentions, $e not voting, $f members ('013' in
+#            the Security Council; a missing count is 0); $a a remark on the vote
+#   952 $a   meeting record
+#   993 $a   documents. General Assembly: first indicator 2 = draft, 3 = committee report;
+#            Security Council: all drafts
+#   991      agenda: $c the item's title, $d its subject
+# Field 591 (free text about the vote) is not used, and neither is the nearly empty 650.
+
+GA_DOCUMENTS = {"2": "draft", "3": "committee_report"}  # 993, first indicator
+ARCHIVE_METHODS = {"vote": "recorded vote", "without vote": "without a vote"}  # 590 $a
+
+
+class _MarcRecord:
+    """One MARC record: its id (field 001) and its data fields,
+    {tag: [(indicator 1, indicator 2, [(subfield code, value), ...]), ...]}."""
+
+    __slots__ = ("id", "fields")
+
+    def __init__(self, record_id: str | None, fields: dict[str, list[tuple[str, str, list[tuple[str, str]]]]]):
+        self.id = record_id
+        self.fields = fields
+
+    def subfields(self, tag: str) -> Iterator[tuple[str, str]]:
+        for _, _, subfields in self.fields.get(tag, []):
+            yield from subfields
+
+    def values(self, tag: str, code: str) -> list[str]:
+        """Every non-empty value of one subfield, e.g. values('991', 'd') -> all subjects."""
+        return [value.strip() for c, value in self.subfields(tag) if c == code and value.strip()]
+
+    def first(self, tag: str, code: str) -> str | None:
+        values = self.values(tag, code)
+        return values[0] if values else None
+
+
+def _marc_records(path: Path) -> Iterator[_MarcRecord]:
+    """The records of a MARCXML file (.xml or .xml.gz), read one at a time, so the General
+    Assembly archive (about 300 MB) needs little memory."""
+    opener = gzip.open if path.suffix.lower() == ".gz" else open
+    try:
+        with opener(path, "rb") as file:
+            events = ET.iterparse(file, events=("start", "end"))
+            _, root = next(events)
+            for event, element in events:
+                if event != "end" or _local_name(element.tag) != "record":
+                    continue
+                record_id, fields = None, {}
+                for field in element:
+                    kind, tag = _local_name(field.tag), field.get("tag")
+                    if kind == "controlfield" and tag == "001":
+                        record_id = (field.text or "").strip() or None
+                    elif kind == "datafield":
+                        fields.setdefault(tag, []).append((
+                            field.get("ind1") or " ", field.get("ind2") or " ",
+                            [(subfield.get("code"), subfield.text or "") for subfield in field],
+                        ))
+                yield _MarcRecord(record_id, fields)
+                root.clear()  # forget the records already read
+    except (ET.ParseError, OSError, EOFError, StopIteration) as exc:
+        raise ValueError(
+            f"{path.name} is not a complete MARCXML file ({exc}). Download it again by hand."
+        ) from exc
+
+
+def _local_name(tag: str) -> str:
+    """'{http://www.loc.gov/MARC21/slim}record' -> 'record'"""
+    return tag.rpartition("}")[2]
+
+
+def _load_archive(writer: VoteWriter, path: Path, body_id: str, source_id: str, names: _Names,
+                  log: Callable[[str], None]) -> tuple[int, int]:
+    """One decision per record and, for recorded votes, one vote per member. Returns the
+    number of decisions and of votes."""
+    decisions = votes = 0
+    skipped: list[str] = []
+    batch: list[tuple] = []
+    for record in _marc_records(path):
+        if not record.first("791", "a"):
+            skipped.append(record.id or "(no id)")
+            continue
+        decision = _archive_decision(record, body_id)
+        # Without a vote the Security Council records list every member as 'X': nobody voted.
+        members = [] if decision["adoption_method"] == "without a vote" else record.fields.get("967", [])
+        decision_id = writer.add_decision(**decision, source_id=source_id,
+                                          votes_source_id=source_id if members else None)
+        decisions += 1
+        for _, _, subfields in members:
+            member = dict(subfields)
+            code = (member.get("c") or "").strip()
+            if not code:
+                continue
+            name = (member.get("e") or "").strip() or code
+            names.add(code, name, decision["date"] or "")
+            raw = (member.get("d") or "").strip().upper()
+            label = "permanent member" if body_id == SC and (member.get("b") or "").strip() == "P" else None
+            batch.append((decision_id, writer.member_id(body_id, code, name),
+                          VOTES.get(raw, "non_voting"), raw or None, label))
+        if len(batch) >= BATCH:
+            writer.add_votes(batch)
+            votes += len(batch)
+            batch.clear()
+    writer.add_votes(batch)
+    votes += len(batch)
+    if skipped:
+        log(f"  Skipped {len(skipped)} records without a resolution symbol (791 $a): "
+            + ", ".join(skipped[:10]) + (" ..." if len(skipped) > 10 else ""))
+    return decisions, votes
+
+
+def _archive_decision(record: _MarcRecord, body_id: str) -> dict:
+    """The decision in one archive record, as arguments for VoteWriter.add_decision."""
+    symbol = record.first("791", "a")
+    # 'S/RES/2830 (2026)' -> 'S/RES/2830(2026)', like every other Security Council symbol;
+    # General Assembly symbols keep their space, as in the CSV ('A/RES/62/223 A').
+    identifier = re.sub(r"\s+", "", symbol) if body_id == SC else " ".join(symbol.split())
+    method = ARCHIVE_METHODS.get((record.first("590", "a") or "").lower())
+    if method == "recorded vote" and "967" not in record.fields:
+        method = "non-recorded vote"
+
+    title = " ".join(" ".join(value for code, value in record.subfields("245") if code in "abc").split())
+    if body_id == GA:
+        title = _clean_ga_title(title)
+
+    vote_date, other_date = record.first("992", "a"), record.first("269", "a")
+    date_note = None
+    if vote_date and other_date and not vote_date.startswith(other_date):  # '2003-03' fits '2003-03-28'
+        date_note = (
+            f"The Library's record gives two dates: {vote_date} (field 992, shown as `date`) and "
+            f"{other_date} (field 269). Check the meeting record if the exact day matters."
+        )
+
+    documents: dict[str, list[str]] = {"draft": [], "committee_report": []}
+    for ind1, _, subfields in record.fields.get("993", []):
+        kind = GA_DOCUMENTS.get(ind1) if body_id == GA else "draft"
+        if kind:
+            documents[kind] += [value.strip() for code, value in subfields if code == "a" and value.strip()]
+
+    agenda = list(dict.fromkeys(record.values("991", "c")))
+    subjects = list(dict.fromkeys(record.values("991", "d")))
+    other_symbols = record.values("791", "z")
+    return dict(
+        body_id=body_id,
+        identifier=identifier,
+        title=title or None,
+        date=vote_date or other_date,
+        session=record.first("791", "c") if body_id == GA else None,
+        adoption_method=method,
+        outcome="adopted",  # the archives only contain adopted resolutions
+        totals=_archive_totals(record, method),
+        note=" ".join(record.values("996", "a")) or None,
+        details={
+            "undl_id": record.id,
+            "draft": documents["draft"],
+            "committee_report": documents["committee_report"],
+            "meeting": record.values("952", "a"),
+            "agenda_items": agenda,
+            "subjects": subjects,
+            "other_symbols": other_symbols,
+            "date_note": date_note,
+        },
+        keywords=" ".join(agenda + subjects + other_symbols),
+        record_url=RECORD_URL.format(record.id) if record.id else None,
+    )
+
+
+def _archive_totals(record: _MarcRecord, method: str | None) -> tuple:
+    """(yes, no, abstain, non_voting, members) from field 996. A count that is left out is 0
+    (the other counts add up to the number of members)."""
+    counts = {code: _int(value) for code, value in record.subfields("996") if code in "bcdef"}
+    if all(count is None for count in counts.values()):
+        return (None,) * 5
+    if method == "without a vote":  # the record says 0 yes, 0 no: keep only the number of members
+        return (None, None, None, None, counts.get("f"))
+    return tuple(counts.get(code) or 0 for code in "bcde") + (counts.get("f"),)
 
 
 # --- Members ------------------------------------------------------------------------

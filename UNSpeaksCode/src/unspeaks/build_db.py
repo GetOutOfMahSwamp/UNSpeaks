@@ -2,8 +2,9 @@
 
     uv run unspeaks-build-db
 
-Run it again whenever you download a newer version of a dataset. The database is
-written to data/unspeaks.sqlite (not in Git).
+Run it again whenever you download a newer version of a dataset or of a voting archive
+(the Library refreshes those weekly). The database is written to data/unspeaks.sqlite
+(not in Git). Nothing is downloaded: the build only reads the files in data/raw/.
 """
 
 from __future__ import annotations
@@ -22,9 +23,13 @@ from unspeaks.votes.store import VoteWriter
 def build(raw_dir: Path, output: Path, log=print) -> dict:
     """Build into a temporary file first, so a failed build never breaks a working database."""
     temporary = output.with_name(output.name + ".building")
-    with VoteWriter.create(temporary) as writer:
-        writer.add_meta("built_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
-        summary = undl.load(writer, raw_dir, log)
+    try:
+        with VoteWriter.create(temporary) as writer:
+            writer.add_meta("built_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+            summary = undl.load(writer, raw_dir, log)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
     if not summary:
         temporary.unlink(missing_ok=True)
         return summary
@@ -40,7 +45,11 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.monotonic()
     print(f"Datasets folder: {args.raw_dir}")
-    summary = build(args.raw_dir, args.output)
+    try:
+        summary = build(args.raw_dir, args.output)
+    except ValueError as exc:  # e.g. an incomplete download
+        print(f"Build stopped; the existing database was not changed. {exc}", file=sys.stderr)
+        return 1
     if not summary:
         print(
             "No datasets found. Download them from the UN Digital Library (see the README, "
