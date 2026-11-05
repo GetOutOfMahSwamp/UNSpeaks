@@ -20,13 +20,39 @@ src/unspeaks/
 │   ├── service.py   #   look-ups and search used by the tools
 │   └── models.py    #   what the voting tools return
 └── sources/         # one loader per data source: everything source-specific lives here
-    └── undl.py      #   UN Dag Hammarskjöld Library datasets (GA, SC, Member States, Permanent Representatives)
+    └── undl.py      #   UN Dag Hammarskjöld Library: weekly voting archives (MARCXML) and datasets
+                     #   (GA, SC, Member States, Permanent Representatives)
 scripts/try_ods.py   # try a download by hand, without MCP
-tests/               # offline tests (fake ODS, tiny copies of the UN datasets)
+tests/               # offline tests (fake ODS, tiny copies of the UN archives and datasets)
 ```
 
 Downloaded documents are cached in `../data/cache/ods/`, and the voting database is
 `../data/unspeaks.sqlite`. Neither is in Git.
+
+### Where the voting data comes from
+
+`unspeaks-build-db` only reads files in `../data/raw/`; it never downloads anything. For
+each body it uses the Library's weekly MARCXML archive if it is there, and otherwise the
+CSV datasets, so you can mix them (say, the GA archive with the SC CSV):
+
+| Body | Used first | Otherwise |
+|---|---|---|
+| General Assembly | `all_voting_data_general_assembly.xml` or `.xml.gz` | `*_ga_outcomes.csv` and `*_ga_voting.csv` |
+| Security Council | `all_voting_data_security_council.xml` or `.xml.gz` | `*_sc_voting.csv` |
+
+The archives are downloaded by hand (see the [main README](../README.md#data-sources)) and
+keep the Library's file names. Their citation is the download link plus the download
+date, taken from the file's modification date. The build log says which files it used.
+
+The MARCXML fields UNSpeaks reads are listed at the top of the archive section in
+`sources/undl.py`. In short:
+
+- `791 $a` symbol, `791 $c` GA session, `245` title, `992` date (`269` only when `992` is missing; a different `269` goes into `details.date_note`)
+- `590` "Vote" / "Without Vote"; a vote without `967` fields is a non-recorded vote
+- `967` one per member (`$c` code, `$e` name, `$d` Y/N/A/X, blank = not voting, `$b` P = SC permanent member)
+- `996` totals (a missing count is 0), `996 $a` the remark on the vote
+- `952` meeting, `993` drafts and GA committee reports, `991 $c` agenda items, `991 $d` subjects
+- `591` (free text) and `650` (nearly empty) are not used
 
 ### Adding another assembly or parliament
 
@@ -76,4 +102,5 @@ Then restart Claude Desktop completely.
 | `get_member_state` | A Member State's names over time, codes, membership dates, related states, Security Council years, vote counts and Permanent Representatives |
 
 After pulling a new version, run `uv run unspeaks-build-db` again if the database schema changed
-(`get_member_state` says so when it did), then restart Claude Desktop.
+(`get_member_state` says so when it did), then restart Claude Desktop. Rebuild too whenever you
+download newer voting archives (the Library refreshes them weekly).
