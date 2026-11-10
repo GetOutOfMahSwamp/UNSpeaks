@@ -13,15 +13,20 @@ data/raw/ (unzipped or still as .xml.gz); otherwise its CSV datasets:
 - *_ga_voting.csv    General Assembly voting data (one row per Member State per vote)
 - *_sc_voting.csv    Security Council voting data (one row per member per resolution)
 
-Members (always CSV datasets):
+Members and people (always CSV datasets):
 - *_unms_names.csv   UN Member States, all their names, with dates and codes: used for
                      get_member_state, and to recognise a country however it's written
                      ('Netherlands', 'Pays-Bas', 'NLD', ...)
 - *_ambassadors.csv  Permanent Representatives: heads of the Member States' missions
+- *_unms_sc_representatives.csv
+                     Security Council representatives and presidents
+- GA_debate_speech_dataset_YYYYMMDD.csv (the Library's name; *_general_debate_speeches.csv
+                     also works)  General Assembly general debate: one row per speech
 
 For each CSV dataset the newest file is used; file names start with their date, e.g.
-2026_02_06_ga_voting.csv. The Library's description files (saved next to the CSVs, see
-find_description) are read for the version, the publication date and the exact citation.
+2026_02_06_ga_voting.csv, or end with it, e.g. GA_debate_speech_dataset_20260129.csv. The
+Library's description files (saved next to the CSVs, see find_description) are read for the
+version, the publication date and the exact citation.
 The archives keep the Library's file names, so their download date for the citation is
 the file's modification date. When you download newer files, rebuild the database and the
 citations update automatically.
@@ -29,11 +34,13 @@ citations update automatically.
 
 from __future__ import annotations
 
+import ast
 import csv
 import gzip
 import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Callable, Iterator
@@ -81,6 +88,8 @@ class Dataset:
     kind: str
     title: str
     record_url: str
+    # The Library's own file name, when it doesn't start with a date (the date is at its end).
+    library_glob: str | None = None
 
 
 DATASETS = {
@@ -89,6 +98,11 @@ DATASETS = {
     "sc_voting": Dataset("sc_voting", "Security Council Voting Data", "https://digitallibrary.un.org/record/4055387"),
     "unms_names": Dataset("unms_names", "United Nations Member States", "https://digitallibrary.un.org/record/4082085"),
     "ambassadors": Dataset("ambassadors", "United Nations Permanent Representatives", "https://digitallibrary.un.org/record/4091498"),
+    "sc_representatives": Dataset("sc_representatives", "United Nations Security Council representatives and presidents",
+                                  "https://digitallibrary.un.org/record/4047618"),
+    "general_debate_speeches": Dataset("general_debate_speeches", "United Nations General debate speeches",
+                                       "https://digitallibrary.un.org/record/4067189",
+                                       library_glob="GA_debate_speech_dataset_*.csv"),
 }
 
 
@@ -126,24 +140,36 @@ BATCH = 50_000
 
 
 def find_file(raw_dir: Path, kind: str) -> Path | None:
-    """The newest file for a dataset, e.g. 2026_02_06_ga_voting.csv (names start with a date)."""
-    candidates = sorted(Path(raw_dir).glob(f"*_{kind}.csv"))
-    return candidates[-1] if candidates else None
+    """The newest file for a dataset, e.g. 2026_02_06_ga_voting.csv (names start with a date),
+    or under the Library's own name if it has one, e.g. GA_debate_speech_dataset_20260129.csv."""
+    folder = Path(raw_dir)
+    candidates = set(folder.glob(f"*_{kind}.csv"))
+    if DATASETS[kind].library_glob:
+        candidates.update(folder.glob(DATASETS[kind].library_glob))
+    return max(candidates, key=lambda path: (_file_date(path) or "", path.name)) if candidates else None
+
+
+def _file_date(path: Path) -> str | None:
+    """The date in a file name as 'YYYY_MM_DD': at its start (2026_02_06_ga_voting.csv) or
+    at its end (GA_debate_speech_dataset_20260129.csv)."""
+    match = re.match(r"(\d{4})_(\d{2})_(\d{2})_", path.stem) or re.search(r"_(\d{4})(\d{2})(\d{2})$", path.stem)
+    return "_".join(match.groups()) if match else None
 
 
 def find_description(csv_path: Path, title: str) -> Path | None:
     """The Library's description file, saved next to the CSV. Its name varies:
     '<csv name>_md.md', '<csv name>_1.md', or a name of its own with the same date, such as
-    2026_08_17_UN_member_states.md for 2026_08_17_unms_names.csv. In that last case the
-    title inside the file must be the dataset's title."""
+    2026_08_17_UN_member_states.md for 2026_08_17_unms_names.csv, or
+    2026_01_29_general_debate_speeches.md for GA_debate_speech_dataset_20260129.csv. In that
+    last case the title inside the file must be the dataset's title."""
     folder, stem = csv_path.parent, csv_path.stem
     if (folder / f"{stem}_md.md").exists():
         return folder / f"{stem}_md.md"
     named = sorted(folder.glob(f"{stem}_*.md"))
     if named:
         return named[0]
-    day = re.match(r"\d{4}_\d{2}_\d{2}_", stem)
-    for candidate in sorted(folder.glob(f"{day.group(0)}*.md")) if day else []:
+    day = _file_date(csv_path)
+    for candidate in sorted(folder.glob(f"{day}_*.md")) if day else []:
         sections = _markdown_sections(candidate.read_text(encoding="utf-8-sig"))
         if [line.lower() for line in sections.get("title", [])[:1]] == [title.lower()]:
             return candidate
@@ -162,18 +188,20 @@ def read_source_info(kind: str, csv_path: Path, log: Callable[[str], None] = lam
     if md_path:
         sections = _markdown_sections(md_path.read_text(encoding="utf-8-sig"))
         if sections.get("version"):  # e.g. 'Current version: 6 (17 Aug. 2026)'
-            info["version"] = re.sub(r"^current version:\s*", "Version ", sections["version"][0], flags=re.I)
+            version = sections["version"][0]
+            # The speeches description misspells it: 'Verison 3 (Jan. 2026)'.
+            word = re.match(r"(?:current\s+)?(ver(?:si|is)on)\b:?\s*", version, flags=re.I)
+            if word:
+                if word.group(1).lower() != "version":
+                    log(f"  {md_path.name}: read '{word.group(1)}' in its version as 'Version'.")
+                version = "Version " + version[word.end():]
+            info["version"] = version
         if sections.get("date of publication"):
             info["published"] = _parse_date(sections["date of publication"][0])
         if sections.get("citation"):
-            citation = re.sub(r"\\?\[download date\\?\]", downloaded_on, sections["citation"][0])
-            url = re.search(r"https://digitallibrary\.un\.org/(?:record/)?\d+", citation)
-            if url and url.group(0) != dataset.record_url:
-                # The Permanent Representatives description cites record 4047618, which is the
-                # Security Council representatives dataset. Cite the dataset's own record.
-                log(f"  {md_path.name} cites {url.group(0)}; citing {dataset.record_url} instead.")
-                citation = citation.replace(url.group(0), dataset.record_url)
-            info["citation"] = citation
+            info["citation"] = _correct_citation(
+                re.sub(r"\\?\[download date\\?\]", downloaded_on, sections["citation"][0]),
+                dataset, md_path.name, log)
 
     if not info["citation"]:
         version = f", {info['version']}" if info["version"] else ""
@@ -183,6 +211,30 @@ def read_source_info(kind: str, csv_path: Path, log: Callable[[str], None] = lam
         )
     info["downloaded_on"] = downloaded_on
     return info
+
+
+def _correct_citation(citation: str, dataset: Dataset, file_name: str, log: Callable[[str], None]) -> str:
+    """Correct what is demonstrably wrong in a description's citation, and say so in the log:
+    - a link to another record: the Permanent Representatives description cites record 4047618,
+      which is the Security Council representatives dataset;
+    - a link without '/record/': the speeches description links https://digitallibrary.un.org/4067189;
+    - the title of another dataset: the speeches description cites 'Security Council Representatives'.
+    The rest (such as the year) is kept as written."""
+    url = re.search(r"https://digitallibrary\.un\.org/(?:record/)?\d+", citation)
+    if url and url.group(0) != dataset.record_url:
+        log(f"  {file_name} cites {url.group(0)}; citing {dataset.record_url} instead.")
+        citation = citation.replace(url.group(0), dataset.record_url)
+    # 'United Nations Dag Hammarskjöld Library, <title>, United Nations, ...'
+    title = re.match(r"(.*?Library,\s*)([^,]+?)(\s*,\s*United Nations\b)", citation)
+    if title and _plain_title(title.group(2)) != _plain_title(dataset.title):
+        log(f"  {file_name} cites the title '{title.group(2)}'; citing '{dataset.title}' instead.")
+        citation = title.group(1) + dataset.title + citation[title.end(2):]
+    return citation
+
+
+def _plain_title(title: str) -> str:
+    """'United Nations Permanent Representatives' and 'Permanent Representatives' are the same title."""
+    return re.sub(r"^united nations\s+", "", normalize_name(title))
 
 
 def find_archive(raw_dir: Path, archive: Archive) -> Path | None:
@@ -281,9 +333,7 @@ def load(writer: VoteWriter, raw_dir: Path, log: Callable[[str], None] = lambda 
     if names.all:
         aliases = _load_members(writer, names, files["unms_names"], log)
         summary["members"] = len(names.all)
-        if files["ambassadors"]:
-            log(f"Reading {files['ambassadors'].name} ...")
-            summary["representatives"] = _load_representatives(writer, files["ambassadors"], aliases, log)
+        summary.update(_load_people(writer, files, aliases, log))
     return summary
 
 
@@ -793,33 +843,196 @@ def _related(code: str, rows: list[dict], aliases: _Aliases, display: dict[str, 
     return list(related.values())
 
 
-def _load_representatives(writer: VoteWriter, path: Path, aliases: _Aliases,
-                          log: Callable[[str], None]) -> int:
-    """The Permanent Representatives dataset: one row per person, with the name(s) of the
-    Member State(s) they represented ('Slovakia|Czechoslovakia')."""
-    writer.add_representative_role(PR_ROLE, PR_NOTES, "undl:ambassadors")
-    count = 0
+# --- People: Permanent Representatives, Security Council, general debate --------------
+#
+# The Permanent Representatives and Security Council datasets have one row per person, with
+# the person's record id (undl_id): a person in both is one person. The speeches dataset has
+# one row per speech, with the speech's record id and the speaker's name, but no person id.
+# A speech is linked to a person's record only when the name is exactly the same AND the
+# Member State is the same member (Syria and Syrian Arab Republic are: same code). Otherwise
+# the speaker is listed under the name as recorded, once per Member State.
+
+SC_ROLE = "Security Council representative"
+SC_NOTES = (
+    "Representatives of Member States on the Security Council, from the Library's 'Security Council "
+    "representatives and presidents' dataset. The dataset has no dates, so it does not say when someone "
+    "sat on the Council, or who represents a member there now. Some functions carry a date (e.g. "
+    "'Security Council President (Feb. 1976)'). The member's name is as given in the person's record, "
+    "sometimes a former name ('Byelorussian SSR'). get_member_state shows the years a member had a seat."
+)
+SC_PRESIDENT_ROLE = "Security Council president"
+SC_PRESIDENT_NOTES = (
+    "People who presided over the Security Council, from the Library's 'Security Council representatives "
+    "and presidents' dataset. The presidency rotates among the Council's members every month; the months a "
+    "person presided are in their `functions`, e.g. 'Security Council President (Feb. 1976)'. The dataset "
+    "does not say who presides now."
+)
+SPEAKER_ROLE = "General debate speaker"
+SPEAKER_NOTES = (
+    "Speeches in the General Assembly's general debate, sessions {first} to {last} ({start} to {end}), one "
+    "entry per speech, from the Library's 'General debate speeches' dataset; later sessions are not in it. "
+    "Each speech has its own record (`record_url`) and the symbol of the meeting record it is in "
+    "(`document`; read it with get_document). The dataset has no person ids: a speech is linked to a "
+    "person's record only when the name and the Member State are the same (`matched_by`). Otherwise the "
+    "speaker is listed under the name as recorded, once per Member State, so one name can appear more than "
+    "once. Entries without `code` are for delegations that are not Member States in the data, such as "
+    "observers."
+)
+MATCHED_BY_NAME = "name and Member State"
+
+
+@dataclass
+class _Person:
+    name: str
+    salutation: str | None = None
+    other_names: list[str] = field(default_factory=list)
+    record_url: str | None = None
+    roles: list[dict] = field(default_factory=list)  # arguments for VoteWriter.add_person_role
+
+    def add_names(self, names) -> None:
+        for name in names:
+            if name and name != self.name and name not in self.other_names:
+                self.other_names.append(name)
+
+
+def _load_people(writer: VoteWriter, files: dict[str, Path | None], aliases: _Aliases,
+                 log: Callable[[str], None]) -> dict:
+    """Everyone in the people datasets that are in raw_dir. Returns counts per dataset."""
+    summary: dict[str, int] = {}
+    people: dict[str, _Person] = {}  # 'record:<id>' for a person's record, 'speaker:...' otherwise
     unknown: set[str] = set()
-    for row in _rows(path):
-        recorded: dict[str, list[str]] = {}
-        for name in _split(row.get("member state")) or []:
-            code = aliases.resolve(name)
-            if code:
-                recorded.setdefault(code, []).append(name)
-            else:
-                unknown.add(name)
-        for code, member_names in recorded.items():
-            writer.add_representative(
-                code, PR_ROLE, row["name"].strip(),
-                salutation=(row.get("salutation") or "").strip() or None,
-                other_names=_split(row.get("alternative names")),
-                recorded_as=member_names,
-                notes=_split(row.get("notes")),
-                record_url=row.get("undl_link") or None,
-            )
-            count += 1
+    if files["ambassadors"]:
+        log(f"Reading {files['ambassadors'].name} ...")
+        writer.add_role(PR_ROLE, PR_NOTES, "undl:ambassadors", listed_with_member=True)
+        summary["representatives"] = _load_person_records(
+            files["ambassadors"], people, aliases, unknown, "member state", "alternative names", PR_ROLE)
+    if files["sc_representatives"]:
+        log(f"Reading {files['sc_representatives'].name} ...")
+        writer.add_role(SC_ROLE, SC_NOTES, "undl:sc_representatives")
+        writer.add_role(SC_PRESIDENT_ROLE, SC_PRESIDENT_NOTES, "undl:sc_representatives")
+        summary["sc_representatives"] = _load_person_records(
+            files["sc_representatives"], people, aliases, unknown, "member_states", "alternative_names", SC_ROLE)
     if unknown:
         log("  Not matched to a member (skipped): " + ", ".join(sorted(unknown)))
+    if files["general_debate_speeches"]:
+        log(f"Reading {files['general_debate_speeches'].name} ...")
+        summary["speeches"] = _load_speeches(writer, files["general_debate_speeches"], people, aliases, log)
+
+    for person in people.values():
+        if not person.roles:  # e.g. none of the member names they represented is known
+            continue
+        person_id = writer.add_person(person.name, salutation=person.salutation,
+                                      other_names=person.other_names, record_url=person.record_url)
+        for role in person.roles:
+            writer.add_person_role(person_id, **role)
+    return summary
+
+
+def _load_person_records(path: Path, people: dict[str, _Person], aliases: _Aliases, unknown: set[str],
+                         member_column: str, other_names_column: str, role: str) -> int:
+    """A dataset with one row per person (Permanent Representatives, Security Council
+    representatives), with the name(s) of the member(s) they represented
+    ('Slovakia|Czechoslovakia'). Returns the number of roles added (one per person and member)."""
+    count = 0
+    for row in _rows(path):
+        name = row["name"].strip()
+        key = f"record:{(row.get('undl_id') or '').strip() or name}"
+        person = people.get(key)
+        if person is None:
+            person = people[key] = _Person(name, record_url=(row.get("undl_link") or "").strip() or None)
+        person.add_names([name, *(_split(row.get(other_names_column)) or [])])
+        person.salutation = person.salutation or (row.get("salutation") or "").strip() or None
+
+        recorded: dict[str, list[str]] = {}
+        for member_name in _split(row.get(member_column)) or []:
+            code = aliases.resolve(member_name)
+            if code:
+                recorded.setdefault(code, []).append(member_name)
+            else:
+                unknown.add(member_name)
+        notes = _split(row.get("notes"))
+        president = (row.get("sc_president") or "").strip().lower() == "true" or any(
+            note.startswith("Security Council President") for note in notes or [])
+        for code, member_names in recorded.items():
+            person.roles.append(dict(role=role, code=code, recorded_as=member_names, notes=notes))
+            count += 1
+            if role == SC_ROLE and president:
+                person.roles.append(dict(role=SC_PRESIDENT_ROLE, code=code, recorded_as=member_names))
+    return count
+
+
+def _load_speeches(writer: VoteWriter, path: Path, people: dict[str, _Person], aliases: _Aliases,
+                   log: Callable[[str], None]) -> int:
+    """The general debate dataset: one row per speech. Returns the number of speeches."""
+    by_name: dict[str, list[str]] = {}  # name -> keys of people with a record
+    codes: dict[str, set[str]] = {}  # key -> the members the person represented
+    for key, person in people.items():
+        by_name.setdefault(person.name, []).append(key)
+        codes[key] = {role["code"] for role in person.roles}
+
+    seen: set[tuple] = set()
+    duplicates = linked = 0
+    other_member: set[str] = set()  # speakers with the name of a record but another member
+    ambiguous: set[str] = set()  # speakers whose name and member fit several records
+    non_members: Counter = Counter()
+    sessions: list[int] = []
+    dates: list[str] = []
+    for row in _rows(path):
+        fields = tuple(value for column, value in row.items() if column)  # not the unnamed row number
+        if fields in seen:
+            duplicates += 1
+            continue
+        seen.add(fields)
+        name = row["Name"].strip()
+        member_name = row["Member State"].strip()
+        code = aliases.resolve(member_name)
+        if not code:
+            non_members[member_name] += 1
+
+        same = [key for key in by_name.get(name, []) if code in codes[key]] if code else []
+        if len(same) == 1:
+            key, matched_by = same[0], MATCHED_BY_NAME
+            linked += 1
+        else:
+            if same:
+                ambiguous.add(f"{name} ({member_name})")
+            elif by_name.get(name):
+                other_member.add(f"{name} ({member_name})")
+            key, matched_by = f"speaker:{name}|{code or member_name}", None
+            if key not in people:
+                people[key] = _Person(name, salutation=(row.get("Salutation") or "").strip() or None)
+
+        session = (row.get("GA Session") or "").strip() or None
+        day = (row.get("Meeting Date") or "").strip() or None
+        undl_id = (row.get("UNDL ID") or "").strip()
+        people[key].roles.append(dict(
+            role=SPEAKER_ROLE, code=code, recorded_as=[member_name], session=session, date=day,
+            document=(row.get("Meeting Symbol") or "").strip() or None,
+            details={"agenda_items": _list_text(row.get("Agenda Items"))},
+            record_url=(row.get("UNDL Link") or "").strip() or (RECORD_URL.format(undl_id) if undl_id else None),
+            matched_by=matched_by,
+        ))
+        if session and session.isdigit():
+            sessions.append(int(session))
+        if day:
+            dates.append(day)
+
+    count = len(seen)
+    writer.add_role(SPEAKER_ROLE, SPEAKER_NOTES.format(
+        first=min(sessions, default="?"), last=max(sessions, default="?"),
+        start=min(dates, default="?"), end=max(dates, default="?")), "undl:general_debate_speeches")
+    if duplicates:
+        log(f"  Skipped {duplicates} duplicate rows (the same as another row apart from the row number).")
+    log(f"  Linked {linked} of {count} speeches to a person's record by name and Member State.")
+    if other_member:
+        log(f"  Not linked, same name as a person's record but another Member State ({len(other_member)}): "
+            + ", ".join(sorted(other_member)[:10]) + (" ..." if len(other_member) > 10 else ""))
+    if ambiguous:
+        log(f"  Not linked, name and Member State fit several people's records ({len(ambiguous)}): "
+            + ", ".join(sorted(ambiguous)))
+    if non_members:
+        log("  Not a member in the data, kept under the name as recorded: "
+            + ", ".join(f"{name} ({n})" for name, n in non_members.most_common()))
     return count
 
 
@@ -854,6 +1067,20 @@ def _totals(row: dict) -> tuple:
 def _split(value: str | None) -> list[str] | None:
     parts = [part.strip() for part in (value or "").split("|") if part.strip()]
     return parts or None
+
+
+def _list_text(value: str | None) -> list[str] | None:
+    """"['A', 'B']" (a Python list written as text, as in some rows of the speeches dataset)
+    or 'A|B' -> ['A', 'B']"""
+    text = (value or "").strip()
+    if text.startswith("["):
+        try:
+            items = ast.literal_eval(text)  # only reads literals; never runs code
+        except (ValueError, SyntaxError):
+            items = None
+        if isinstance(items, list):
+            return [str(item).strip() for item in items if str(item).strip()] or None
+    return _split(text)
 
 
 def _periods(value: str | None) -> list[list[str | None]]:
