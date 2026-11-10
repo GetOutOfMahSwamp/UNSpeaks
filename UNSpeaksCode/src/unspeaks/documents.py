@@ -11,7 +11,7 @@ from typing import Callable
 
 from pydantic import BaseModel, Field
 
-from unspeaks.ods_client import OdsClient
+from unspeaks.ods_client import FetchedPdf, OdsClient
 from unspeaks.pdf_text import load_pages
 
 DEFAULT_PAGES = 3
@@ -67,6 +67,15 @@ class DocumentService:
         if self._client is None:
             self._client = OdsClient()
         return self._client
+
+    def fetch_pdf(self, symbol: str, language: str = "en") -> FetchedPdf:
+        """The PDF of a document, downloaded only if it isn't cached yet.
+
+        Other tools (search_meetings) fetch through here, so every download shares one
+        client, one rate limiter and the one-document-at-a-time lock.
+        """
+        with self._lock:
+            return self.client.fetch_pdf(symbol, language)
 
     def get_pages(
         self,

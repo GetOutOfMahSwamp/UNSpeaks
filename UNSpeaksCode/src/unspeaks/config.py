@@ -64,6 +64,14 @@ MAX_REQUESTS = 100
 WINDOW_SECONDS = 300.0
 MIN_INTERVAL_SECONDS = 3.0  # 100 requests per 300 s = one every 3 s
 
+# --- Calendar of conferences and meetings (search_meetings) ---------------------
+# The ODS symbol of the calendar for each year. The Secretariat publishes a new one
+# early each year (the 2026 one is "as at 2 February 2026"); add it here when it is
+# out, and look up its symbol in ODS rather than guessing it.
+MEETING_CALENDARS: dict[int, str] = {
+    2026: "A/AC.172/2026/2",
+}
+
 MAX_ATTEMPTS = 3  # tries per request when the server says "slow down" or fails
 MAX_RETRY_WAIT_SECONDS = 120.0  # longest we wait inside one call; longer = give up
 CONNECT_TIMEOUT_SECONDS = 15.0

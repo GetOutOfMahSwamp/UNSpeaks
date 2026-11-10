@@ -24,6 +24,8 @@ from unspeaks.documents import (
     DocumentRequestError,
     DocumentService,
 )
+from unspeaks.meetings.models import SearchMeetingsResult
+from unspeaks.meetings.service import MeetingLookupError, MeetingService
 from unspeaks.ods_client import OdsError
 from unspeaks.votes.models import MemberProfile, SearchPeopleResult, SearchVotesResult, VotingRecord
 from unspeaks.votes.service import VotingLookupError, VotingService
@@ -42,6 +44,9 @@ UNSpeaks gives you access to official United Nations information.
   in each answer); say so when a question is about something more recent.
 - The people data has no dates of service: never present anyone as the current holder
   of a role.
+- Meetings come from the yearly calendar of conferences and meetings, which is "as at" a
+  date early in the year. It lists sessions, not single meetings, and gives no dates for
+  bodies that meet "as required", such as the Security Council: say so in your answer.
 - UNSpeaks is an independent project, not affiliated with or endorsed by the UN.
 """
 
@@ -79,6 +84,23 @@ def set_voting(service: VotingService | None) -> None:
     _voting = service
 
 
+_meetings: MeetingService | None = None
+
+
+def get_meetings() -> MeetingService:
+    global _meetings
+    if _meetings is None:
+        # Fetch through the document service: one ODS client, rate limiter and lock for all tools.
+        _meetings = MeetingService(fetch_pdf=lambda symbol, language: get_service().fetch_pdf(symbol, language))
+    return _meetings
+
+
+def set_meetings(service: MeetingService | None) -> None:
+    """Swap the meetings service (used by tests)."""
+    global _meetings
+    _meetings = service
+
+
 LOCAL_READ_ONLY = ToolAnnotations(
     read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
 )
@@ -89,6 +111,9 @@ Role = Literal["Permanent Representative", "Security Council representative", "S
 AdoptionMethod = Literal["recorded vote", "non-recorded vote", "without a vote"]
 DateText = Annotated[str, Field(pattern=r"^\d{4}(-\d{2}(-\d{2})?)?$", description="YYYY-MM-DD, YYYY-MM or YYYY")]
 VOTING_ERRORS = (VotingLookupError, DataNotLoadedError)
+ODS_READ_ONLY = ToolAnnotations(  # reads UN documents, downloading them from ODS if not cached
+    read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True
+)
 
 
 @mcp.tool(title="Search UN votes", annotations=LOCAL_READ_ONLY)
@@ -309,6 +334,72 @@ def search_people(
         return get_voting().search_people(name=name, member=member, role=role, session=session,
                                           limit=limit, page=page)
     except VOTING_ERRORS as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool(title="Search UN meetings", annotations=ODS_READ_ONLY)
+def search_meetings(
+    date_from: Annotated[
+        DateText | None,
+        Field(description="First day of the period: YYYY-MM-DD, or YYYY-MM / YYYY for a whole month or "
+              "year. Default: today."),
+    ] = None,
+    date_to: Annotated[
+        DateText | None,
+        Field(description="Last day of the period. Default: two weeks from date_from (or the end of the "
+              "month or year given as date_from)."),
+    ] = None,
+    body: Annotated[
+        str | None,
+        Field(description="Words in the name of the body, as the calendar writes it: 'Human Rights "
+              "Council', 'Security Council', 'Fifth Committee', 'WFP', 'UNICEF', 'IAEA'. Every word "
+              "must match (word beginnings count); case and accents don't matter."),
+    ] = None,
+    location: Annotated[
+        str | None,
+        Field(description="Words in the location, e.g. 'New York', 'Geneva', 'Vienna', 'Nairobi'."),
+    ] = None,
+    limit: Annotated[
+        int, Field(ge=1, le=50, description="Sessions per page (1-50). The busiest week of 2026 has 29.")
+    ] = 50,
+    page: Annotated[int, Field(ge=1, description="Page number, starting at 1.")] = 1,
+) -> SearchMeetingsResult:
+    """Find which UN bodies meet in a period, and where: the sessions in the official calendar
+    of conferences and meetings.
+
+    Use it to answer, for example:
+    - "Which UN meetings are there next week in New York?": date_from and date_to for that
+      week, location='New York'
+    - "When does the Human Rights Council meet?": body='Human Rights Council', date_from='2026'
+    - "Is the Security Council meeting next week?": body='Security Council' with the dates
+
+    Each session has the body, the session title, the dates as printed (`dates`) with `start`
+    and `end`, the location, and its entry number and page in the calendar. A session counts
+    when it overlaps the period, so long sessions (the General Assembly's main committees)
+    show up for every week they run; sessions come by start date, those known only by half
+    year last.
+
+    Good to know, and say it in your answer:
+    - The calendar is "as at" an early date in the year (`sources[].as_at`): later changes
+      are missing. For the current programme, point to the Journal of the United Nations.
+    - It lists sessions (a period in which a body meets), not single meetings: no agendas,
+      times or rooms.
+    - The Security Council and other bodies that meet "as required" have no dates. They are
+      counted in `undated_total` and listed in `undated` when `body` matches them. Never
+      conclude that such a body is not meeting.
+    - `date_precision` 'month' means only the month is known ('November (one meeting)');
+      `to_be_confirmed` means the calendar marked the dates so.
+    - section 'A' = UN bodies; 'B' = specialized agencies, IAEA and treaty bodies.
+    - `today` is the server's date: use it to work out "next week".
+    - Read `notes`. Cite `sources` (symbol and URL) and mention `limitations`.
+
+    To read an entry in the calendar itself, use get_document with the source symbol and
+    start_page=page.
+    """
+    try:
+        return get_meetings().search(date_from=date_from, date_to=date_to, body=body,
+                                     location=location, limit=limit, page=page)
+    except (MeetingLookupError, OdsError) as exc:
         raise ToolError(str(exc)) from exc
 
 
