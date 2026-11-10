@@ -132,3 +132,74 @@ async def test_voting_errors_reach_the_ai(voting_db):
         bad_date = await client.call_tool("search_votes", {"date_from": "last year"})
     assert unknown.is_error is True and "No adopted decision" in unknown.content[0].text
     assert bad_date.is_error is True
+
+
+# --- meetings tool ----------------------------------------------------------------
+
+
+@pytest.fixture
+def meetings(tmp_path):
+    from datetime import date
+
+    from unspeaks.meetings.service import MeetingService
+    from meetings_fixtures import SYMBOL, calendar_fetcher, write_calendar_pdf
+
+    fetch = calendar_fetcher(write_calendar_pdf(tmp_path))
+    server.set_meetings(
+        MeetingService(fetch_pdf=fetch, calendars={2026: SYMBOL}, today=lambda: date(2026, 11, 10))
+    )
+    yield fetch
+    server.set_meetings(None)
+
+
+@pytest.mark.anyio
+async def test_search_meetings_is_listed_next_to_the_other_tools(meetings):
+    async with Client(server.mcp) as client:
+        tools = {t.name: t for t in (await client.list_tools()).tools}
+    assert set(tools) == {
+        "get_document", "get_member_state", "get_voting_record", "search_meetings", "search_people",
+        "search_votes",
+    }
+    tool = tools["search_meetings"]
+    assert set(tool.input_schema["properties"]) == {"date_from", "date_to", "body", "location", "limit", "page"}
+    assert not tool.input_schema.get("required")  # every parameter is optional
+    assert tool.annotations.read_only_hint is True and tool.output_schema is not None
+    assert "not single meetings" in tool.description and '"as required"' in tool.description
+
+
+@pytest.mark.anyio
+async def test_search_meetings_answers_next_week_in_new_york_in_one_call(meetings):
+    async with Client(server.mcp) as client:
+        result = await client.call_tool(
+            "search_meetings", {"date_from": "2026-11-16", "date_to": "2026-11-22", "location": "New York"}
+        )
+    assert result.is_error is False
+    data = result.structured_content
+    assert [m["entry"] for m in data["meetings"]] == [314, 292]
+    source = data["sources"][0]
+    assert (source["symbol"], source["as_at"]) == ("A/AC.172/2026/2", "2026-02-02")
+    assert data["undated_total"] == 3 and len(data["limitations"]) == 4
+
+
+@pytest.mark.anyio
+async def test_search_meetings_problems_reach_the_ai(meetings):
+    async with Client(server.mcp) as client:
+        backwards = await client.call_tool("search_meetings", {"date_from": "2026-11-20", "date_to": "2026-11-10"})
+        not_a_date = await client.call_tool("search_meetings", {"date_from": "next week"})
+    assert backwards.is_error is True and "before date_from" in backwards.content[0].text
+    assert not_a_date.is_error is True
+    assert meetings.calls == []  # nothing was fetched for questions that can't be answered
+
+
+@pytest.mark.anyio
+async def test_search_meetings_reports_ods_problems(meetings):
+    from unspeaks.meetings.service import MeetingService
+    from unspeaks.ods_client import OdsUnavailableError
+
+    def offline(symbol, language):
+        raise OdsUnavailableError("ODS could not be reached.")
+
+    server.set_meetings(MeetingService(fetch_pdf=offline, calendars={2026: "A/AC.172/2026/2"}))
+    async with Client(server.mcp) as client:
+        result = await client.call_tool("search_meetings", {"date_from": "2026-11"})
+    assert result.is_error is True and "ODS could not be reached" in result.content[0].text
