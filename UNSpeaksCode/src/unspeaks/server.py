@@ -25,7 +25,7 @@ from unspeaks.documents import (
     DocumentService,
 )
 from unspeaks.ods_client import OdsError
-from unspeaks.votes.models import MemberProfile, SearchVotesResult, VotingRecord
+from unspeaks.votes.models import MemberProfile, SearchPeopleResult, SearchVotesResult, VotingRecord
 from unspeaks.votes.service import VotingLookupError, VotingService
 from unspeaks.votes.store import DataNotLoadedError
 
@@ -37,9 +37,11 @@ UNSpeaks gives you access to official United Nations information.
   that the tools return.
 - Documents are downloaded from UN servers on demand, within strict rate limits.
   Only fetch documents you actually need, and read long documents a few pages at a time.
-- Voting and Member State data come from the UN Dag Hammarskjöld Library and are
+- Voting, Member State and people data come from the UN Dag Hammarskjöld Library and are
   downloaded by hand from time to time, so they end at a certain date (see `data_until`
   in each answer); say so when a question is about something more recent.
+- The people data has no dates of service: never present anyone as the current holder
+  of a role.
 - UNSpeaks is an independent project, not affiliated with or endorsed by the UN.
 """
 
@@ -82,6 +84,8 @@ LOCAL_READ_ONLY = ToolAnnotations(
 )
 Body = Literal["UNGA", "UNSC"]
 Position = Literal["yes", "no", "abstain", "non_voting"]
+Role = Literal["Permanent Representative", "Security Council representative", "Security Council president",
+               "General debate speaker"]
 AdoptionMethod = Literal["recorded vote", "non-recorded vote", "without a vote"]
 DateText = Annotated[str, Field(pattern=r"^\d{4}(-\d{2}(-\d{2})?)?$", description="YYYY-MM-DD, YYYY-MM or YYYY")]
 VOTING_ERRORS = (VotingLookupError, DataNotLoadedError)
@@ -204,7 +208,8 @@ def get_member_state(
     ],
     include_representatives: Annotated[
         bool,
-        Field(description="Set to false to leave out the list of its Permanent Representatives."),
+        Field(description="Set to false to leave out the list of its Permanent Representatives and the "
+              "counts of other people who acted for it."),
     ] = True,
 ) -> MemberProfile:
     """Facts about a UN Member State: its names over time, codes, membership dates, the states
@@ -226,12 +231,83 @@ def get_member_state(
       Never present someone as the current representative; give the dated roles and
       `recorded_as` as clues, and say where to check (see the note in `representatives`).
     - Names are shown as in the UN data. Only Member States are included, not observer States.
+    - `other_people` only counts its Security Council representatives and presidents and its
+      general debate speakers; list them with search_people.
     - The data ends at `sources[].data_until`. Cite `sources` when you use it.
 
     Use search_votes with the same member to see how it voted on a topic.
     """
     try:
         return get_voting().get_member(member, include_representatives=include_representatives)
+    except VOTING_ERRORS as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool(title="Search people who acted for UN Member States", annotations=LOCAL_READ_ONLY)
+def search_people(
+    name: Annotated[
+        str | None,
+        Field(description="Words of the person's name, in any order: 'Daniel Patrick Moynihan', 'Lula', "
+              "'U Thant'. Every word must match (word beginnings count); case and accents don't matter, "
+              "and other forms of the name are searched too."),
+    ] = None,
+    member: Annotated[
+        str | None,
+        Field(description="A Member State, current or former: a name in any common form ('Netherlands', "
+              "'Burma', 'USSR') or a code ('NLD'). Delegations that are not Member States, such as the Holy "
+              "See or Palestine, are matched by the name as recorded."),
+    ] = None,
+    role: Annotated[
+        Role | None,
+        Field(description="Only people in this role. 'Permanent Representative': head of the mission in "
+              "New York. 'General debate speaker': one entry per speech."),
+    ] = None,
+    session: Annotated[
+        str | None,
+        Field(pattern=r"^\d{1,3}$",
+              description="General Assembly session, e.g. '79'. Only general debate speeches have a session."),
+    ] = None,
+    limit: Annotated[int, Field(ge=1, le=50, description="People per page (1-50).")] = 10,
+    page: Annotated[int, Field(ge=1, description="Page number, starting at 1.")] = 1,
+) -> SearchPeopleResult:
+    """Find people who spoke or acted for a UN Member State: speakers in the General Assembly's
+    general debate, Permanent Representatives (heads of mission in New York), and Security
+    Council representatives and presidents.
+
+    Based on the UN Dag Hammarskjöld Library's datasets. Use it to answer, for example:
+    - "Who spoke for Brazil in the general debate of session 79?": member='Brazil', session='79'
+    - "Was Daniel Patrick Moynihan ever President of the Security Council?":
+      name='Daniel Patrick Moynihan', then look at `roles` and `functions`
+    - "Which Dutch representatives sat on the Security Council?": member='Netherlands',
+      role='Security Council representative'
+
+    Each person comes with their roles per member and, for speakers, one entry per speech with
+    its session, date and meeting record (`document`: read it with get_document; the meeting
+    record holds several speeches).
+
+    Good to know:
+    - Only speeches and some functions are dated ('Security Council President (Feb. 1976)').
+      The data does not say when someone held a role, or who holds it now: never present anyone
+      as the current Permanent Representative, Security Council representative or president.
+    - Names of people and Member States are as recorded, often the name at the time ('Burma').
+      `code` is the member's code for the other tools.
+    - The speeches dataset has no person ids. A speech is linked to a person's record only when
+      the name and the Member State are the same (`matched_by`); otherwise the speaker is listed
+      under the name as recorded, once per Member State. So one name can appear more than once:
+      don't assume those are one person, or different people.
+    - The salutation ('Mr.', 'Ms.') is as used in UN documents; it doesn't necessarily reflect
+      the person's gender, so don't infer gender from it.
+    - The speeches only cover the sessions given in the note in `roles`.
+    - With a member, role or session, each person shows only the matching entries;
+      `roles_not_shown` counts the others (search by name to see them all). People with
+      speeches come first, newest first, then the others alphabetically; use `page` for more.
+    - Cite `sources` and the `record_url`s when you use the data.
+
+    Use get_member_state for a Member State itself, including the years it sat on the Council.
+    """
+    try:
+        return get_voting().search_people(name=name, member=member, role=role, session=session,
+                                          limit=limit, page=page)
     except VOTING_ERRORS as exc:
         raise ToolError(str(exc)) from exc
 
