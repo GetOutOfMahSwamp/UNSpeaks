@@ -1,4 +1,4 @@
-"""Look up and search voting records. Generic: works for any body in the database."""
+"""Look up and search voting records, members and people. Generic: works for any body in the database."""
 
 from __future__ import annotations
 
@@ -14,15 +14,20 @@ from unspeaks.votes.models import (
     MemberVote,
     NameInUse,
     Participation,
+    Person,
+    PersonRole,
     RelatedMember,
     Representative,
     RepresentativeGroup,
+    RoleCount,
+    RoleInfo,
+    SearchPeopleResult,
     SearchVotesResult,
     SourceInfo,
     VoteTotals,
     VotingRecord,
 )
-from unspeaks.votes.store import VOTE_VALUES, DataNotLoadedError, VoteStore
+from unspeaks.votes.store import VOTE_VALUES, DataNotLoadedError, VoteStore, _fts_query, normalize_name
 
 EXPLANATIONS = {
     "recorded vote": "Adopted by a recorded vote: how each {member} voted is listed in `votes`.",
@@ -38,6 +43,11 @@ EXPLANATIONS = {
 
 # Set by a loader: which source provided the member names used to recognise members.
 MEMBER_NAMES_SOURCE = "member_names_source"
+
+PEOPLE_NOTE = (
+    "Entries without a date don't say when the person held the role, or whether they still do: never "
+    "present anyone as the current holder of a role. Names of people and members are as recorded."
+)
 
 
 class VotingLookupError(Exception):
@@ -191,20 +201,20 @@ class VotingService:
     def get_member(self, member: str, include_representatives: bool = True) -> MemberProfile:
         """Who a member is: its names over time, membership dates, the members it came from
         or became, how it took part in recorded votes and, if wanted, who represented it."""
-        if int(self.store.meta("schema_version") or 0) < 3:
-            raise DataNotLoadedError(
-                "The database was built by an older version of UNSpeaks and has no member profiles "
-                "yet. Run `uv run unspeaks-build-db` in the UNSpeaksCode folder again."
-            )
+        self._require_schema(4)
         code, _ = self._resolve_member(member)
         profile = self.store.member_profile(code)
         names = json.loads(profile["names"]) if profile["names"] else []
         source_ids: list[str | None] = [profile["source_id"]]
         participation = self._participation(code, source_ids)
-        representatives = None
+        representatives = other_people = None
         if include_representatives:
             # Which of its names a person served under only says something if it had several.
             representatives = self._representatives(code, len(names) > 1, source_ids)
+            other_people = []
+            for row in self.store.role_counts(code):
+                other_people.append(RoleCount(role=row["role"], people=row["people"], entries=row["entries"]))
+                source_ids.append(row["source_id"])
 
         return MemberProfile(
             code=code,
@@ -222,6 +232,7 @@ class VotingService:
             details=json.loads(profile["details"]) if profile["details"] else {},
             participation=participation,
             representatives=representatives,
+            other_people=other_people,
             record_url=profile["record_url"],
             sources=self._sources(source_ids),
         )
@@ -277,7 +288,110 @@ class VotingService:
             group.total += 1
         return list(groups.values())
 
+    # --- people ------------------------------------------------------------------------
+
+    def search_people(self, *, name: str | None = None, member: str | None = None,
+                      role: str | None = None, session: str | None = None,
+                      limit: int = 10, page: int = 1) -> SearchPeopleResult:
+        """People who acted for a member, by name, member, role and/or session. With filters on
+        member, role or session, each person shows only their matching entries."""
+        self._require_schema(4)
+        name, member, role, session = (value.strip() if value else None for value in (name, member, role, session))
+        if not any((name, member, role, session)):
+            raise VotingLookupError("Give at least one of: a name, a member, a role or a session.")
+        if name and not _fts_query(name):
+            raise VotingLookupError("The name needs at least one letter or digit.")
+
+        roles = {row["role"]: row for row in self.store.roles()}
+        if role:
+            role = next((known for known in roles if known.lower() == role.lower()), None) or role
+            if role not in roles:
+                raise VotingLookupError(f"Unknown role '{role}'. The roles in the data are: {', '.join(roles)}.")
+
+        source_ids: list[str | None] = []
+        code = member_label = None
+        member_names: list[str] | None = None
+        if member:
+            matches = self.store.resolve_member(member)
+            if len(matches) == 1:
+                code = matches[0]["code"]
+                member_label = f"{matches[0]['name']} ({code})"
+                source_ids.append(self.store.meta(MEMBER_NAMES_SOURCE))
+            elif matches:
+                self._resolve_member(member)  # raises: ambiguous
+            else:
+                member_names = self._names_of_non_members(member)
+                if not member_names:
+                    self._resolve_member(member)  # raises: not found
+                member_label = " / ".join(member_names) + " (not a member in the data; matched by the name as recorded)"
+
+        limit = max(1, min(limit, 50))
+        page = max(1, page)
+        total, people_rows, entries = self.store.search_people(
+            name=name, code=code, member_names=member_names, role=role, session=session,
+            limit=limit, offset=(page - 1) * limit,
+        )
+
+        per_person: dict[int, list] = {}
+        for entry in entries:
+            per_person.setdefault(entry["person_id"], []).append(entry)
+        people, roles_shown = [], []
+        for row in people_rows:
+            own = per_person.get(row["person_id"], [])
+            shown = [entry for entry in own if entry["matches"]]
+            functions: list[str] = []
+            for entry in own:
+                functions += [note for note in _json_list(entry["notes"]) if note not in functions]
+            for entry in shown:
+                source_ids.append(entry["role_source_id"])
+                if entry["role"] not in roles_shown:
+                    roles_shown.append(entry["role"])
+            people.append(Person(
+                name=row["name"],
+                salutation=row["salutation"],
+                other_names=_json_list(row["other_names"]),
+                functions=functions,
+                roles=[_person_role(entry) for entry in shown],
+                roles_not_shown=len(own) - len(shown),
+                record_url=row["record_url"],
+            ))
+
+        if not people:  # still say what was searched
+            roles_shown = [role] if role else list(roles)
+            source_ids += [roles[r]["source_id"] for r in roles_shown]
+        note = PEOPLE_NOTE
+        if total == 0:
+            note += (" Nobody found. Try fewer or other words of the name, or fewer filters. Only the "
+                     "sessions and people in the data are included (see `roles` and `sources`).")
+        return SearchPeopleResult(
+            total=total,
+            page=page,
+            limit=limit,
+            has_more=page * limit < total,
+            member=member_label,
+            people=people,
+            roles=[RoleInfo(role=r, note=roles[r]["notes"]) for r in roles_shown],
+            note=note,
+            sources=self._sources(source_ids),
+        )
+
+    def _names_of_non_members(self, text: str) -> list[str]:
+        """Names as recorded for entries whose member is not in the data (e.g. 'Holy See'), that
+        contain the text as whole words: 'Palestine' -> 'Palestine', 'State of Palestine'."""
+        key = normalize_name(text)
+        if not key:
+            return []
+        return [name for name in self.store.unmatched_member_names()
+                if f" {key} " in f" {normalize_name(name)} "]
+
     # --- helpers -----------------------------------------------------------------------
+
+    def _require_schema(self, version: int) -> None:
+        if int(self.store.meta("schema_version") or 0) < version:
+            raise DataNotLoadedError(
+                "The database was built by an older version of UNSpeaks. Run "
+                "`uv run unspeaks-build-db` in the UNSpeaksCode folder again."
+            )
 
     def _resolve_member(self, text: str) -> tuple[str, str]:
         rows = self.store.resolve_member(text)
@@ -367,6 +481,20 @@ def _year_ranges(years: set[int]) -> list[str]:
 
 def _json_list(value: str | None) -> list[str]:
     return json.loads(value) if value else []
+
+
+def _person_role(entry: sqlite3.Row) -> PersonRole:
+    return PersonRole(
+        role=entry["role"],
+        member=" / ".join(_json_list(entry["recorded_as"])) or (entry["code"] or ""),
+        code=entry["code"],
+        session=entry["session"],
+        date=entry["date"],
+        document=entry["document"],
+        details=json.loads(entry["details"]) if entry["details"] else {},
+        matched_by=entry["matched_by"],
+        record_url=entry["record_url"],
+    )
 
 
 def _shorten(text: str | None, limit: int = 200) -> str | None:

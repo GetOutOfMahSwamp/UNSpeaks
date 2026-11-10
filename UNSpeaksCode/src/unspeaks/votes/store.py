@@ -1,7 +1,7 @@
 """The voting database (SQLite): schema, writing (used by the build step) and reading.
 
 The schema is the same for every body. Source-specific extras go in the JSON
-`details` column of a decision and in the `notes` of a body.
+`details` column of a decision or a person's role, and in the `notes` of a body or a role.
 """
 
 from __future__ import annotations
@@ -14,7 +14,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Iterator
 
-SCHEMA_VERSION = "3"  # 3: member profiles with name history, and representatives
+SCHEMA_VERSION = "4"  # 4: people and their roles (incl. speeches), replacing representatives
+# 3: member profiles with name history, and representatives
 
 # How a member voted. UN data uses yes/no/abstain/non_voting; 'present' is there for
 # parliaments such as the US Senate.
@@ -89,20 +90,31 @@ CREATE TABLE member_aliases (       -- every name people might use, normalised
     priority  INTEGER NOT NULL,     -- 0 = the code, 1 = name used in the votes, 2 = other names
     PRIMARY KEY (alias_key, code)
 ) WITHOUT ROWID;
-CREATE TABLE representative_roles ( -- kinds of representatives, e.g. 'Permanent Representative'
-    role      TEXT PRIMARY KEY,
-    notes     TEXT,                 -- what the data does and doesn't cover
-    source_id TEXT REFERENCES sources(source_id)
+CREATE TABLE roles (                -- kinds of roles, e.g. 'Permanent Representative', 'General debate speaker'
+    role               TEXT PRIMARY KEY,
+    notes              TEXT,        -- what the data does and doesn't cover
+    listed_with_member INTEGER NOT NULL DEFAULT 0,  -- 1 = listed in a member's profile, 0 = only counted there
+    source_id          TEXT REFERENCES sources(source_id)
 );
-CREATE TABLE representatives (      -- people who represented a member, e.g. a country's ambassadors
-    code        TEXT NOT NULL,
-    role        TEXT NOT NULL REFERENCES representative_roles(role),
+CREATE TABLE people (               -- people who acted for a member: representatives, speakers, ...
+    person_id   INTEGER PRIMARY KEY,
     name        TEXT NOT NULL,      -- as recorded, e.g. 'Gregoire-Van-Haaren, Lise'
-    salutation  TEXT,
+    salutation  TEXT,               -- as recorded, e.g. 'Ms.'
     other_names TEXT,               -- JSON list
-    recorded_as TEXT,               -- JSON list: the member's name(s) as given in this person's record
+    record_url  TEXT                -- the person's own record; NULL if the sources have none
+);
+CREATE TABLE person_roles (         -- a person in a role for a member; for speakers one row per speech
+    person_id   INTEGER NOT NULL REFERENCES people(person_id),
+    role        TEXT NOT NULL REFERENCES roles(role),
+    code        TEXT,               -- the member's code; NULL if the name is not a member (e.g. an observer)
+    recorded_as TEXT,               -- JSON list: the member's name(s) as given in the source
+    session     TEXT,               -- for dated entries such as speeches, e.g. a General Assembly session
+    date        TEXT,               -- YYYY-MM-DD
+    document    TEXT,               -- a related document, e.g. the meeting record of a speech
     notes       TEXT,               -- JSON list: functions, e.g. 'Security Council President (Mar. 2018)'
-    record_url  TEXT
+    details     TEXT,               -- JSON: source-specific fields
+    record_url  TEXT,               -- the entry's own record, if it has one (e.g. a speech)
+    matched_by  TEXT                -- NULL: the entry names this person; otherwise how it was linked
 );
 CREATE TABLE votes (
     decision_id INTEGER NOT NULL,
@@ -117,6 +129,11 @@ CREATE VIRTUAL TABLE decisions_fts USING fts5(   -- full-text search; rowid = de
     content = '',
     tokenize = 'unicode61 remove_diacritics 2'
 );
+CREATE VIRTUAL TABLE people_fts USING fts5(      -- name search; rowid = person_id
+    names,
+    content = '',
+    tokenize = 'unicode61 remove_diacritics 2'
+);
 """
 
 INDEXES = """
@@ -124,7 +141,9 @@ CREATE INDEX decisions_lookup ON decisions(lookup_key);
 CREATE INDEX decisions_body_date ON decisions(body_id, date);
 CREATE INDEX members_code ON members(code);
 CREATE INDEX votes_member ON votes(member_id, decision_id);
-CREATE INDEX representatives_code ON representatives(code, role);
+CREATE INDEX person_roles_person ON person_roles(person_id);
+CREATE INDEX person_roles_code ON person_roles(code, role);
+CREATE INDEX person_roles_role ON person_roles(role, session);
 """
 
 
@@ -175,11 +194,14 @@ class VoteWriter:
 
     def _finish(self) -> None:
         self.conn.executescript(INDEXES)
-        # The newest decision; a source without decisions keeps the date given by its loader.
+        # The newest decision or dated role (e.g. a speech); a source without either keeps the
+        # date given by its loader.
         self.conn.execute(
             """UPDATE sources SET data_until = COALESCE((
                    SELECT MAX(date) FROM decisions d
-                   WHERE d.source_id = sources.source_id OR d.votes_source_id = sources.source_id),
+                   WHERE d.source_id = sources.source_id OR d.votes_source_id = sources.source_id), (
+                   SELECT MAX(r.date) FROM person_roles r JOIN roles USING (role)
+                   WHERE roles.source_id = sources.source_id),
                    data_until)"""
         )
         self.conn.execute("ANALYZE")
@@ -271,20 +293,45 @@ class VoteWriter:
              _json(names), _json(related), _json(details), record_url, source_id),
         )
 
-    def add_representative_role(self, role: str, notes: str | None = None,
-                                source_id: str | None = None) -> None:
+    def add_role(self, role: str, notes: str | None = None, source_id: str | None = None, *,
+                 listed_with_member: bool = False) -> None:
+        """A kind of role, e.g. 'Permanent Representative'. With `listed_with_member` the people in
+        this role are listed in a member's profile; otherwise they are only counted there."""
         self.conn.execute(
-            "INSERT OR REPLACE INTO representative_roles VALUES (?, ?, ?)", (role, notes, source_id)
+            "INSERT OR REPLACE INTO roles VALUES (?, ?, ?, ?)",
+            (role, notes, int(listed_with_member), source_id),
         )
 
-    def add_representative(self, code: str, role: str, name: str, *, salutation: str | None = None,
-                           other_names: list[str] | None = None, recorded_as: list[str] | None = None,
-                           notes: list[str] | None = None, record_url: str | None = None) -> None:
-        """One person who represented one member in one role (add the role first)."""
+    def add_person(self, name: str, *, salutation: str | None = None,
+                   other_names: list[str] | None = None, record_url: str | None = None) -> int:
+        """Add one person and return their id. Their names are searchable."""
+        cursor = self.conn.execute(
+            "INSERT INTO people (name, salutation, other_names, record_url) VALUES (?,?,?,?)",
+            (name, salutation, _json(other_names), record_url),
+        )
+        person_id = int(cursor.lastrowid)
         self.conn.execute(
-            "INSERT INTO representatives VALUES (?,?,?,?,?,?,?,?)",
-            (code, role, name, salutation, _json(other_names), _json(recorded_as), _json(notes),
-             record_url),
+            "INSERT INTO people_fts (rowid, names) VALUES (?, ?)",
+            (person_id, " ".join([name, *(other_names or [])])),
+        )
+        return person_id
+
+    def add_person_role(self, person_id: int, role: str, code: str | None, *,
+                        recorded_as: list[str] | None = None, session: str | None = None,
+                        date: str | None = None, document: str | None = None,
+                        notes: list[str] | None = None, details: dict | None = None,
+                        record_url: str | None = None, matched_by: str | None = None) -> None:
+        """A person in a role for a member (add the role first). `code` is None when the member's
+        name is not a member in the data, e.g. an observer. Dated entries, such as speeches, get
+        one row each. `matched_by` says how the entry was linked to the person when it does not
+        name them itself, e.g. 'name and Member State'."""
+        details = {k: v for k, v in (details or {}).items() if v not in (None, "", [], {})}
+        self.conn.execute(
+            """INSERT INTO person_roles (person_id, role, code, recorded_as, session, date, document,
+                   notes, details, record_url, matched_by)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (person_id, role, code, _json(recorded_as), session, date, document, _json(notes),
+             _json(details), record_url, matched_by),
         )
 
     def add_member_aliases(self, code: str, names: Iterable[str], priority: int = 2) -> None:
@@ -464,15 +511,95 @@ class VoteStore:
             ).fetchall()
 
     def representatives(self, code: str) -> list[sqlite3.Row]:
-        """People who represented a member, grouped by role (in the order the roles were
-        added), then by name."""
+        """People listed in a member's profile (roles added with `listed_with_member`), grouped
+        by role in the order the roles were added, then by name."""
         with self.connect() as conn:
             return conn.execute(
-                """SELECT r.*, rr.notes AS role_notes, rr.source_id AS role_source_id
-                   FROM representatives r JOIN representative_roles rr USING (role)
-                   WHERE r.code = ? ORDER BY rr.rowid, r.name COLLATE NOCASE""",
+                """SELECT r.role, p.name, p.salutation, p.other_names, r.recorded_as, r.notes,
+                          p.record_url, ro.notes AS role_notes, ro.source_id AS role_source_id
+                   FROM person_roles r JOIN people p USING (person_id) JOIN roles ro USING (role)
+                   WHERE r.code = ? AND ro.listed_with_member = 1
+                   ORDER BY ro.rowid, p.name COLLATE NOCASE""",
                 (code,),
             ).fetchall()
+
+    def role_counts(self, code: str) -> list[sqlite3.Row]:
+        """For the roles only counted in a member's profile: how many people and entries."""
+        with self.connect() as conn:
+            return conn.execute(
+                """SELECT ro.role, ro.source_id, COUNT(DISTINCT r.person_id) AS people,
+                          COUNT(*) AS entries
+                   FROM person_roles r JOIN roles ro USING (role)
+                   WHERE r.code = ? AND ro.listed_with_member = 0
+                   GROUP BY ro.role ORDER BY MIN(ro.rowid)""",
+                (code,),
+            ).fetchall()
+
+    # --- people ---
+
+    def roles(self) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM roles ORDER BY rowid").fetchall()
+
+    def unmatched_member_names(self) -> list[str]:
+        """Names in people's roles that are not a member in the data, e.g. observers."""
+        with self.connect() as conn:
+            return [row[0] for row in conn.execute(
+                """SELECT DISTINCT j.value FROM person_roles r, json_each(r.recorded_as) j
+                   WHERE r.code IS NULL ORDER BY j.value""")]
+
+    def search_people(self, *, name: str | None = None, code: str | None = None,
+                      member_names: list[str] | None = None, role: str | None = None,
+                      session: str | None = None, limit: int = 10,
+                      offset: int = 0) -> tuple[int, list[sqlite3.Row], list[sqlite3.Row]]:
+        """People with at least one role entry that matches all given filters. Returns (total,
+        page of people, all role entries of those people). Each entry has `matches` = 1 if it
+        matches the filters on the entry (member, role, session), so a caller can show only those.
+
+        `name`: words of a name or another form of it, in any order. `code`: a member;
+        `member_names`: instead of a code, names of non-members as recorded (e.g. 'Holy See').
+        People with dated entries come first, newest first; then the others by name.
+        """
+        entry_filters: list[str] = []
+        entry_params: list = []
+        if code:
+            entry_filters.append("r.code = ?")
+            entry_params.append(code)
+        elif member_names:
+            marks = ",".join("?" * len(member_names))
+            entry_filters.append(
+                f"r.code IS NULL AND EXISTS (SELECT 1 FROM json_each(r.recorded_as) WHERE value IN ({marks}))")
+            entry_params += member_names
+        for column, value in (("r.role", role), ("r.session", session)):
+            if value:
+                entry_filters.append(f"{column} = ?")
+                entry_params.append(value)
+        filters, params = list(entry_filters), list(entry_params)
+        if name:
+            filters.append("r.person_id IN (SELECT rowid FROM people_fts WHERE people_fts MATCH ?)")
+            params.append(_fts_query(name))
+
+        matched = ("SELECT r.person_id, MAX(r.date) AS last_date FROM person_roles r"
+                   + (" WHERE " + " AND ".join(filters) if filters else "") + " GROUP BY r.person_id")
+        entry_match = " AND ".join(entry_filters) or "1"
+        with self.connect() as conn:
+            total = conn.execute(f"SELECT COUNT(*) FROM ({matched})", params).fetchone()[0]
+            people = conn.execute(
+                f"""SELECT p.*, m.last_date FROM ({matched}) m JOIN people p USING (person_id)
+                    ORDER BY m.last_date IS NULL, m.last_date DESC, p.name COLLATE NOCASE, p.person_id
+                    LIMIT ? OFFSET ?""",
+                [*params, limit, offset],
+            ).fetchall()
+            ids = [row["person_id"] for row in people]
+            entries = conn.execute(
+                f"""SELECT r.*, CASE WHEN {entry_match} THEN 1 ELSE 0 END AS matches,
+                           ro.source_id AS role_source_id
+                    FROM person_roles r JOIN roles ro USING (role)
+                    WHERE r.person_id IN ({",".join("?" * len(ids))})
+                    ORDER BY r.person_id, ro.rowid, r.date DESC, r.rowid""",
+                [*entry_params, *ids],
+            ).fetchall() if ids else []
+        return total, people, entries
 
     # --- bodies, sources and settings ---
 
