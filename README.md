@@ -7,8 +7,9 @@ It connects AI assistants such as Claude to data published by the UN Dag Hammars
 - *"How did the Netherlands vote on General Assembly resolutions about climate change last session?"*
 - *"Which Security Council resolutions were adopted without a vote in 2025?"*
 - *"Who represents Brazil at the UN, and who spoke for Brazil in the general debate?"*
+- *"Which UN meetings are there next week in New York?"*
 
-> **Status: early development.** This is a student project. Five tools work (see [Tools](#tools)).
+> **Status: early development.** This is a student project. Six tools work (see [Tools](#tools)).
 
 UNSpeaks is an independent project. It is **not affiliated with, endorsed by or sponsored by the United Nations** or the Dag Hammarskjöld Library.
 
@@ -25,6 +26,7 @@ AI assistant  ──MCP──▶  UNSpeaks server  ──▶  local SQLite datab
 2. A build command turns them into one local SQLite database.
 3. The MCP server answers the assistant's questions from that database. Every answer includes a source citation.
 4. When a question needs a document's full text, the server fetches that one document from the UN Official Document System, within strict rate limits (see [Guidelines](#terms-of-use-and-how-unspeaks-follows-them)).
+5. Questions about meetings are answered from the year's calendar of conferences and meetings, also an ODS document: it is fetched the same way the first time it is needed, and read once.
 
 ### Tools
 
@@ -33,6 +35,7 @@ AI assistant  ──MCP──▶  UNSpeaks server  ──▶  local SQLite datab
 - [x] `search_votes`: find resolutions by topic, date, session or adoption method, or see how one Member State voted
 - [x] `get_member_state`: a Member State's names over time, codes, membership dates, predecessor and successor states, Security Council terms and Permanent Representatives
 - [x] `search_people`: find people who spoke or acted for a Member State (general debate speakers, Permanent Representatives, Security Council representatives and presidents) by name, Member State, role or General Assembly session
+- [x] `search_meetings`: which UN bodies meet in a period, and where, from the official calendar of conferences and meetings, filtered by dates, body and location
 
 The voting and people tools are built on a generic core (bodies, decisions, members, votes, and people with their roles), with everything UN-specific in a separate loader, so the same tools could later serve another assembly or parliament.
 
@@ -84,6 +87,22 @@ Keep each dataset's file name. Most start with their date (`2026_09_03_unms_sc_r
 
 Individual documents (resolutions, meeting records, reports) come from the UN [Official Document System](https://documents.un.org).
 
+### Meetings: the calendar of conferences and meetings
+
+`search_meetings` uses the calendar of conferences and meetings that the Secretariat issues each year for the Committee on Conferences. It is an ODS document, so UNSpeaks downloads it like any other document (the first time it is needed, then from the cache) and reads its table once.
+
+| Year | Symbol | As at | Entries |
+|---|---|---|---|
+| 2026 | [A/AC.172/2026/2](https://documents.un.org/api/symbol/access?s=A/AC.172/2026/2&l=en&t=pdf) | 2 February 2026 | A: 386 UN bodies (40 meet "as required", 19 "to be determined"); B: 77 meetings of the specialized agencies, IAEA and treaty bodies |
+
+The symbol is set per year in `MEETING_CALENDARS` in `UNSpeaksCode/src/unspeaks/config.py`. When the next year's calendar is out, look up its symbol in ODS and add it there.
+
+Sources that UNSpeaks does **not** use for meetings:
+
+- **The Journal of the United Nations** (`journal.un.org` and its API). It lists single meetings with their agendas about 11 days ahead, but it is not in ODS, its API is not documented, and UNSpeaks has no permission to use it. The tool is built so that it can be added as a second source later.
+- **The calendar page on un.org**, which sits behind a bot check.
+- **The General Assembly RSS feeds**, which only carry same-day press notices, not upcoming meetings.
+
 ---
 
 ## Terms of use and how UNSpeaks follows them
@@ -100,13 +119,14 @@ In practice, that means:
 2. **Attribution in every answer.** Each tool response names its source (the voting archive or dataset, with its version where there is one) and its download date, and links to the resolution's, person's, speech's or dataset's record in the UN Digital Library where possible.
 3. **No automated access to the UN Digital Library.** UNSpeaks does not scrape, crawl or automatically download from `digitallibrary.un.org`, and does not try to get around its bot protection. The voting archives and datasets are downloaded by hand; the build step only reads the files in `data/raw/`. The Library does not permit automated downloads without its approval, and keeps its bot protection in place for the weekly voting archives.
 4. **Careful document downloads.** Documents from `documents.un.org` are fetched:
-   - only when a user asks for one, one document at a time;
+   - only when a question needs one (a document the user asks for, or the meeting calendar the first time `search_meetings` is used), one document at a time;
    - at **no more than 100 requests per 5 minutes**, as the Library recommends;
    - with respect for server responses: on **HTTP 429** or other errors, the server waits (honouring `Retry-After`) instead of retrying straight away;
    - **with caching**, so each document is downloaded only once;
    - with a User-Agent that identifies UNSpeaks.
 5. **No redistribution.** This repository contains no UN datasets or documents. The `data/` folder is excluded from Git.
-6. **Neutral naming.** Country names are shown exactly as they appear in the UN data. For historical votes, that is the name at the time of the vote.
+6. **No other UN sites.** UNSpeaks only contacts `documents.un.org`. It does not call the Journal of the United Nations (`journal.un.org`, `journal-api.un.org`) or the un.org calendar page (see [Meetings](#meetings-the-calendar-of-conferences-and-meetings)).
+7. **Neutral naming.** Country names are shown exactly as they appear in the UN data. For historical votes, that is the name at the time of the vote.
 
 We have asked the Library for guidance on a hosted version of UNSpeaks. This section will be updated with their answer.
 
@@ -123,6 +143,10 @@ For the datasets, each dataset's record page gives the exact citation, for examp
 > United Nations Dag Hammarskjöld Library, General Assembly Voting Data, United Nations, version 5 (February 2026), 2026, downloaded from https://digitallibrary.un.org/record/4060887, [download date]
 
 UNSpeaks reads it from the description file you save next to the dataset, and fills in the download date. Where a description's citation is demonstrably wrong, UNSpeaks corrects that part and says so in the build log (see [Limitations](#limitations)).
+
+For meetings, each answer cites the calendar, its "as at" date and where it was downloaded from:
+
+> United Nations, Calendar of conferences and meetings of the United Nations for 2026 (A/AC.172/2026/2), as at 2 February 2026, Official Document System, https://documents.un.org/doc/undoc/gen/n26/019/67/pdf/n2601967.pdf, accessed 2026-11-05.
 
 ---
 
@@ -146,6 +170,11 @@ UNSpeaks reads it from the description file you save next to the dataset, and fi
 - **Member State profiles list only Permanent Representatives.** `get_member_state` counts a member's Security Council representatives and presidents and general debate speakers (the UK alone has 424 Security Council representatives); `search_people` lists them.
 - **Security Council terms are derived from the votes.** The years in which a Member State took part in recorded Security Council votes are shown as the years it had a seat.
 - **Permanent Representatives citation.** The Library's description file for this dataset cites record 4047618, which is the Security Council representatives dataset. UNSpeaks cites the dataset's own record, [4091498](https://digitallibrary.un.org/record/4091498), instead.
+- **Meetings: sessions, not single meetings.** The calendar lists the period in which a body meets ("16–20 November"), not its individual meetings, agendas, times or rooms.
+- **Meetings: as at 2 February 2026.** The 2026 calendar is not updated after that date, so later changes (new, moved or cancelled sessions) are missing. Every answer says so and points to the Journal of the United Nations for the current programme.
+- **Meetings: no dates for bodies that meet "as required".** The Security Council and its 23 subsidiary bodies, and bodies such as ECOSOC's formal meetings or the General Committee, have no dates in the calendar (40 entries), nor do 19 bodies whose dates are "to be determined". `search_meetings` lists them when the body filter matches, and otherwise counts them, so an answer never suggests that the Security Council isn't meeting.
+- **Meetings: some dates are rough.** Some entries give only a month ("November (one meeting)"), a half year ("Second semester") or dates "to be confirmed". Answers mark these (`date_precision`, `to_be_confirmed`).
+- **Meetings: how the calendar is read.** The calendar's plain text runs its columns together and glues footnote letters to names and dates ("23 Novembers" is 23 November with footnote s). UNSpeaks therefore reads the table from the PDF's layout: column edges from the ruling lines, and footnote letters left out because they are printed smaller. This works for the 2026 calendar (all 463 entries); a calendar with another layout may need changes.
 - **AI can make mistakes.** Check important answers against the linked UN records.
 
 The data is provided by the UN "as is", without warranty. The designations used and the presentation of material do not imply any opinion of the United Nations, or of this project, on the legal status of any country, territory or area, or of its authorities.

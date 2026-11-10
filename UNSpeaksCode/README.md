@@ -19,16 +19,23 @@ src/unspeaks/
 │   │                #   member profiles, people and their roles)
 │   ├── service.py   #   look-ups and search used by the tools
 │   └── models.py    #   what the voting and people tools return
+├── meetings/        # search_meetings: which bodies meet when and where
+│   ├── calendar_pdf.py  # reads the table of the calendar PDF from its layout (cached as JSON)
+│   ├── dates.py     #   "16–20 November", "As required", ... -> periods
+│   ├── service.py   #   MeetingSource (CalendarSource now), filters, notes, limitations
+│   └── models.py    #   what search_meetings returns
 └── sources/         # one loader per data source: everything source-specific lives here
     └── undl.py      #   UN Dag Hammarskjöld Library: weekly voting archives (MARCXML) and datasets
                      #   (GA, SC, Member States, Permanent Representatives, Security Council
                      #   representatives, general debate speeches)
 scripts/try_ods.py   # try a download by hand, without MCP
-tests/               # offline tests (fake ODS, tiny copies of the UN archives and datasets)
+tests/               # offline tests (fake ODS, tiny copies of the UN archives and datasets,
+                     # a tiny calendar PDF)
 ```
 
-Downloaded documents are cached in `../data/cache/ods/`, and the voting database is
-`../data/unspeaks.sqlite`. Neither is in Git.
+Downloaded documents are cached in `../data/cache/ods/` (the meeting calendar's table next
+to its PDF, as `*.calendar.json`), and the voting database is `../data/unspeaks.sqlite`.
+Neither is in Git.
 
 ### Where the voting data comes from
 
@@ -78,6 +85,34 @@ rows it skipped and the corrections it made to the speeches description's citati
 `get_member_state` lists the people in roles added with `listed_with_member` (the Permanent
 Representatives) and only counts the others (`other_people`).
 
+### Where the meetings come from
+
+`search_meetings` reads the calendar of conferences and meetings of each year in
+`config.MEETING_CALENDARS` (2026: `A/AC.172/2026/2`). It fetches the PDF through
+`DocumentService.fetch_pdf`, so it shares the ODS client, rate limiter, lock and cache with
+`get_document`.
+
+`meetings/calendar_pdf.py` reads the table from the PDF's layout with pypdfium2, because the
+plain text runs the columns together and glues footnote letters to words:
+
+- the column edges come from the ruling line at the top of each table header, and each
+  column is named after the header word in it (`Organ` -> `organ`, `Meeting title/...` ->
+  `title`, `Dates` -> `dates`, ...);
+- an entry starts at its number in the first column (only numbers higher than the last one
+  count, which skips the stray "1." at the top of each page) and runs to the next number;
+  text above the first number on a page belongs to the entry on the page before;
+- characters smaller than 80% of the table text (footnote letters) and rotated characters
+  (the symbol along the page edge) are left out; the table ends at a ruling line below its
+  last entry, so the footnotes are not read.
+
+The result is cached next to the PDF as `<name>.calendar.json`. Bump `PARSER_VERSION` when
+you change the reader, so cached results are read again. `meetings/dates.py` then turns the
+"Dates" text into periods.
+
+To add another source, such as the Journal of the United Nations once there is permission,
+write a class with the same `years`, `covers()` and `find()` as `CalendarSource`, return
+items with another `kind` (e.g. `"meeting"`), and pass it to `MeetingService(sources=[...])`.
+
 ### Adding another assembly or parliament
 
 The voting tools only use the generic `votes/` layer. To add, say, the US Senate:
@@ -125,6 +160,7 @@ Then restart Claude Desktop completely.
 | `search_votes` | Find resolutions by words, body, date, session or adoption method, or how one Member State voted |
 | `get_member_state` | A Member State's names over time, codes, membership dates, related states, Security Council years, vote counts and Permanent Representatives |
 | `search_people` | People who spoke or acted for a Member State (general debate speakers, Permanent Representatives, Security Council representatives and presidents), by name, member, role or GA session |
+| `search_meetings` | Sessions of UN bodies in a period from the calendar of conferences and meetings, by dates, body and location; bodies that meet "as required" (Security Council) listed when the body filter matches |
 
 After pulling a new version, run `uv run unspeaks-build-db` again if the database schema changed
 (`get_member_state` and `search_people` say so when it did; schema 4 added the people data), then
