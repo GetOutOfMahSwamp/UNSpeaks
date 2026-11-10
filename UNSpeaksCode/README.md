@@ -14,14 +14,15 @@ src/unspeaks/
 ├── pdf_text.py      # PDF -> text, one string per page
 ├── config.py        # settings (data folder, limits, User-Agent)
 ├── build_db.py      # `unspeaks-build-db`: builds data/unspeaks.sqlite from data/raw/
-├── votes/           # GENERIC voting layer: works for any assembly or parliament
+├── votes/           # GENERIC voting and people layer: works for any assembly or parliament
 │   ├── store.py     #   SQLite schema, writing and reading (bodies, decisions, members, votes,
-│   │                #   member profiles, representatives)
+│   │                #   member profiles, people and their roles)
 │   ├── service.py   #   look-ups and search used by the tools
-│   └── models.py    #   what the voting tools return
+│   └── models.py    #   what the voting and people tools return
 └── sources/         # one loader per data source: everything source-specific lives here
     └── undl.py      #   UN Dag Hammarskjöld Library: weekly voting archives (MARCXML) and datasets
-                     #   (GA, SC, Member States, Permanent Representatives)
+                     #   (GA, SC, Member States, Permanent Representatives, Security Council
+                     #   representatives, general debate speeches)
 scripts/try_ods.py   # try a download by hand, without MCP
 tests/               # offline tests (fake ODS, tiny copies of the UN archives and datasets)
 ```
@@ -53,6 +54,29 @@ The MARCXML fields UNSpeaks reads are listed at the top of the archive section i
 - `996` totals (a missing count is 0), `996 $a` the remark on the vote
 - `952` meeting, `993` drafts and GA committee reports, `991 $c` agenda items, `991 $d` subjects
 - `591` (free text) and `650` (nearly empty) are not used
+
+### Where the people data comes from
+
+`search_people` and the representatives in `get_member_state` use three CSV datasets:
+
+| Dataset | File in `../data/raw/` | One row per | Role(s) |
+|---|---|---|---|
+| Permanent Representatives | `*_ambassadors.csv` | person | Permanent Representative |
+| Security Council representatives and presidents | `*_unms_sc_representatives.csv` | person | Security Council representative, Security Council president |
+| General debate speeches | `GA_debate_speech_dataset_YYYYMMDD.csv` (or `*_general_debate_speeches.csv`) | speech | General debate speaker |
+
+In the generic layer these become `people` and `person_roles`: one row per person, member
+and role, and for speakers one row per speech (with session, date, meeting record and the
+speech's own record). A person in both of the first two datasets (same `undl_id`) is one
+person. The speeches dataset has no person ids, so a speech is linked to a person only when
+the name is exactly the same and the Member State resolves to the same member code; the
+entry then has `matched_by = 'name and Member State'`. Other speakers are listed under their
+name as recorded, once per member (or per recorded name, for non-members such as the Holy
+See). The build log says how many speeches were linked, which names were not, the duplicate
+rows it skipped and the corrections it made to the speeches description's citation.
+
+`get_member_state` lists the people in roles added with `listed_with_member` (the Permanent
+Representatives) and only counts the others (`other_people`).
 
 ### Adding another assembly or parliament
 
@@ -100,7 +124,9 @@ Then restart Claude Desktop completely.
 | `get_voting_record` | How a GA or SC resolution was adopted, totals, and how each member voted (optionally highlighting one) |
 | `search_votes` | Find resolutions by words, body, date, session or adoption method, or how one Member State voted |
 | `get_member_state` | A Member State's names over time, codes, membership dates, related states, Security Council years, vote counts and Permanent Representatives |
+| `search_people` | People who spoke or acted for a Member State (general debate speakers, Permanent Representatives, Security Council representatives and presidents), by name, member, role or GA session |
 
 After pulling a new version, run `uv run unspeaks-build-db` again if the database schema changed
-(`get_member_state` says so when it did), then restart Claude Desktop. Rebuild too whenever you
+(`get_member_state` and `search_people` say so when it did; schema 4 added the people data), then
+restart Claude Desktop. Rebuild too whenever you
 download newer voting archives (the Library refreshes them weekly).

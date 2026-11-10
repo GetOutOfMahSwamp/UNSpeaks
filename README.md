@@ -8,7 +8,7 @@ It connects AI assistants such as Claude to data published by the UN Dag Hammars
 - *"Which Security Council resolutions were adopted without a vote in 2025?"*
 - *"Who represents Brazil at the UN, and who spoke for Brazil in the general debate?"*
 
-> **Status: early development.** This is a student project. Four tools work (see [Tools](#tools)); more are planned.
+> **Status: early development.** This is a student project. Five tools work (see [Tools](#tools)).
 
 UNSpeaks is an independent project. It is **not affiliated with, endorsed by or sponsored by the United Nations** or the Dag Hammarskjöld Library.
 
@@ -32,9 +32,9 @@ AI assistant  ──MCP──▶  UNSpeaks server  ──▶  local SQLite datab
 - [x] `get_voting_record`: how a General Assembly or Security Council resolution was adopted and how each Member State voted
 - [x] `search_votes`: find resolutions by topic, date, session or adoption method, or see how one Member State voted
 - [x] `get_member_state`: a Member State's names over time, codes, membership dates, predecessor and successor states, Security Council terms and Permanent Representatives
-- [ ] `search_people`: find people who spoke or acted for a Member State (general debate speakers, Permanent Representatives, Security Council representatives and presidents) by name, Member State, role or General Assembly session
+- [x] `search_people`: find people who spoke or acted for a Member State (general debate speakers, Permanent Representatives, Security Council representatives and presidents) by name, Member State, role or General Assembly session
 
-The voting tools are built on a generic core (bodies, decisions, members, votes), with everything UN-specific in a separate loader, so the same tools could later serve another assembly or parliament.
+The voting and people tools are built on a generic core (bodies, decisions, members, votes, and people with their roles), with everything UN-specific in a separate loader, so the same tools could later serve another assembly or parliament.
 
 ### Tech stack
 
@@ -76,9 +76,11 @@ If an archive is not in `data/raw/`, UNSpeaks uses the CSV voting datasets below
 | Security Council Voting Data (only used without the SC archive) | v6 (Feb 2026) | Resolutions 1 (1946) to 2815 (30 Jan 2026) | [4055387](https://digitallibrary.un.org/record/4055387) |
 | United Nations Member States | v6 (17 Aug 2026) | All Member State names, codes and membership periods | [4082085](https://digitallibrary.un.org/record/4082085) |
 | United Nations Permanent Representatives | Jan 2026 | Current and historical heads of Permanent Missions in New York | [4091498](https://digitallibrary.un.org/record/4091498) |
-| Security Council representatives and presidents | v3 (3 Sep 2026) | Up to 3 Sep 2026 | [4047618](https://digitallibrary.un.org/record/4047618) |
-| General Assembly general debate speeches | v3 (Jan 2026) | Sessions 1–79 | [4067189](https://digitallibrary.un.org/record/4067189) |
+| Security Council representatives and presidents | v3 (3 Sep 2026) | Representatives on the Council and its presidents, up to 3 Sep 2026 | [4047618](https://digitallibrary.un.org/record/4047618) |
+| General Assembly general debate speeches | v3 (Jan 2026) | 11,193 speeches, sessions 1–79 (Oct 1946 to Sep 2024) | [4067189](https://digitallibrary.un.org/record/4067189) |
 | United Nations Thesaurus | Aug 2026 | Subject vocabulary | [4075456](https://digitallibrary.un.org/record/4075456) |
+
+Keep each dataset's file name. Most start with their date (`2026_09_03_unms_sc_representatives.csv`); the speeches dataset has the Library's own name with the date at the end (`GA_debate_speech_dataset_20260129.csv`), and UNSpeaks finds it under that name. Its description file is `2026_01_29_general_debate_speeches.md`.
 
 Individual documents (resolutions, meeting records, reports) come from the UN [Official Document System](https://documents.un.org).
 
@@ -95,7 +97,7 @@ The data and documents are © United Nations. UNSpeaks follows:
 In practice, that means:
 
 1. **Non-commercial use only.** UNSpeaks is free and has no paid features, ads or resale.
-2. **Attribution in every answer.** Each tool response names its source (the voting archive or dataset, with its version where there is one) and its download date, and links to the resolution's or dataset's record in the UN Digital Library where possible.
+2. **Attribution in every answer.** Each tool response names its source (the voting archive or dataset, with its version where there is one) and its download date, and links to the resolution's, person's, speech's or dataset's record in the UN Digital Library where possible.
 3. **No automated access to the UN Digital Library.** UNSpeaks does not scrape, crawl or automatically download from `digitallibrary.un.org`, and does not try to get around its bot protection. The voting archives and datasets are downloaded by hand; the build step only reads the files in `data/raw/`. The Library does not permit automated downloads without its approval, and keeps its bot protection in place for the weekly voting archives.
 4. **Careful document downloads.** Documents from `documents.un.org` are fetched:
    - only when a user asks for one, one document at a time;
@@ -120,7 +122,7 @@ For the datasets, each dataset's record page gives the exact citation, for examp
 
 > United Nations Dag Hammarskjöld Library, General Assembly Voting Data, United Nations, version 5 (February 2026), 2026, downloaded from https://digitallibrary.un.org/record/4060887, [download date]
 
-UNSpeaks reads it from the description file you save next to the dataset, and fills in the download date.
+UNSpeaks reads it from the description file you save next to the dataset, and fills in the download date. Where a description's citation is demonstrably wrong, UNSpeaks corrects that part and says so in the build log (see [Limitations](#limitations)).
 
 ---
 
@@ -134,7 +136,14 @@ UNSpeaks reads it from the description file you save next to the dataset, and fi
 - **Subjects come from the agenda.** The archives have almost no subject terms of their own (field 650). UNSpeaks uses the subject of each resolution's agenda item (field 991), which is exactly what the CSV datasets list as subjects, and which newer resolutions have too.
 - **Divided resolutions.** The archive lists some resolutions by their parts where the CSV dataset had one symbol, for example A/RES/80/231 A and A/RES/80/231 B for A/RES/80/231. Asking for the undivided symbol gives a "did you mean" with the parts.
 - **Known errors in the data.** In the archive, France is marked as an elected member of the Security Council for S/RES/1752(2007); the CSV dataset has the same error. The archive corrects some errors of the CSV dataset: Somalia marked as a permanent member for five resolutions in 2025, and China and Russia recorded as voting yes on S/RES/2812(2026), where they abstained.
-- **Permanent Representatives have no dates.** The dataset lists current and past heads of mission, but not when they served, so UNSpeaks can't say who is in office now. Dated roles (such as "Security Council President (Mar. 2018)") and the country name a person served under are given as clues.
+- **People have no dates of service.** The Permanent Representatives and Security Council representatives datasets list current and past people, but not when they served, so UNSpeaks never says who is in office now. Dated functions (such as "Security Council President (Mar. 2018)") and the country name a person served under are given as clues. Only speeches have a date.
+- **Speeches are linked to people by name and Member State.** The speeches dataset has the speaker's name but no person id: its record ids are those of the speeches. UNSpeaks links a speech to a person in the other two datasets only when the name is exactly the same *and* the Member State is the same member (so "Syria" and "Syrian Arab Republic" count as the same). In the January 2026 data, 3,445 of the 11,193 speeches are linked this way, and each link is marked in the answer. Three names match a person's record but not the Member State, and are not linked: "Monteiro, António" spoke for Cape Verde in 1993, while the record with that name is Portugal's Permanent Representative; "Sattar, Abdul" spoke for Pakistan, while the record is the Maldives'; and "Makame, Hasnu" spoke for Tanzania, while the record says Zanzibar. The first two are probably different people, the third probably the same person. A speaker without a record is listed once per Member State, so four names appear twice: "Abbas, Mahmoud" (PLO and State of Palestine), "Drnovsek, Janez" (Yugoslavia and Slovenia), "Kambona, Oscar S." (Tanganyika and United Republic of Tanzania) and "Moravcik, Josef" (Czechoslovakia and Slovakia).
+- **Speeches end at session 79.** The speeches dataset was extracted in January 2026, but its newest speech is from 30 September 2024 (session 79): the general debate of session 80 is not in it.
+- **Speeches description.** Its citation names another dataset ("Security Council Representatives") and links the record without `/record/`. UNSpeaks cites "United Nations General debate speeches" and https://digitallibrary.un.org/record/4067189 instead, and keeps the year 2025 as written. It also reads "Verison 3" as version 3, and ignores the publication date (2024-01-25), which is older than the newest speech: answers give the date of the newest speech. The data dictionary calls the `UNDL Link` the person's record; it is the speech's, and UNSpeaks presents it that way.
+- **Duplicate speeches.** 17 rows of the speeches dataset are copies of another row (only the row number differs). UNSpeaks loads each speech once.
+- **Observers in the speeches.** 53 speeches were given for the Holy See, the State of Palestine, the PLO and Palestine, which are not Member States in the data. UNSpeaks keeps them under the name as recorded, without a Member State code.
+- **Salutations are not a gender.** The salutation ("Mr.", "Ms.") is shown as recorded in UN documents. The Library notes that it doesn't necessarily reflect a person's gender, so UNSpeaks never infers gender from it.
+- **Member State profiles list only Permanent Representatives.** `get_member_state` counts a member's Security Council representatives and presidents and general debate speakers (the UK alone has 424 Security Council representatives); `search_people` lists them.
 - **Security Council terms are derived from the votes.** The years in which a Member State took part in recorded Security Council votes are shown as the years it had a seat.
 - **Permanent Representatives citation.** The Library's description file for this dataset cites record 4047618, which is the Security Council representatives dataset. UNSpeaks cites the dataset's own record, [4091498](https://digitallibrary.un.org/record/4091498), instead.
 - **AI can make mistakes.** Check important answers against the linked UN records.
